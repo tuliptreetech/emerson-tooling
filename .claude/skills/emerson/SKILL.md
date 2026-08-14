@@ -7,19 +7,27 @@ description: Use and control the Emerson hardware/SoC emulator via the `emerson`
 
 Emerson is a Dockerized SoC emulator. Two CLIs, both installed to `~/.local/bin`:
 
-- **`emerson`** — host-side lifecycle tool. Installs/updates Emerson, loads a firmware image, starts/stops the `emerson-server` Docker container.
-- **`emctl`** — runtime control tool that talks to the running server (over HTTP, default `http://localhost:10314`). Used to start/stop emulation *sessions*, inspect and mutate device state, set breakpoints, read logs, etc. `emctl` is a thin host wrapper (`emerson/bin/emctl` script, ~27 lines) that shells out to `docker exec -it emerson-server emctl "$@"` — the real implementation lives inside the container image.
+- **`emerson`** — host-side lifecycle tool. Installs/updates Emerson, loads a firmware image, starts/stops the `emerson-server` Docker container, and runs commands inside it.
+- **`emctl`** — runtime control tool that talks to the running server (over HTTP, default `http://localhost:10314`). Used to start/stop emulation *sessions*, inspect and mutate device state, set breakpoints, read logs, etc. `emctl` is a thin host wrapper (`emerson/bin/emctl` script, ~38 lines) that shells out to `docker exec -it emerson-server emctl "$@"` — the real implementation lives inside the container image.
 
-Config lives at `~/.emerson/config` (bash-sourceable), e.g.:
+Current state (version, image, container status, loaded firmware) is set up by
+`install`/`load` and stored in `~/.emerson/config` (bash-sourceable), but don't
+read that file directly to check state — use `emerson info` instead:
 
 ```
-emerson_version=1.0.5
-emerson_model=stm32f030r8-i2c-demo
-docker_image_name=ghcr.io/tuliptreetech/emerson/stm32f030r8:1.0.4
-emerson_container=emerson-server
-emerson_image_location=/Users/tuliptree/Downloads/stm32f030r8-1.0.4.tar
-emerson_firmware=/Users/tuliptree/flash.bin
+$ emerson info
+Emerson version: 1.0.7
+Docker image: ghcr.io/tuliptreetech/emerson/stm32f030r8:1.0.7-local
+Container (emerson-server): running
+Firmware loaded: /Users/tuliptree/flash.bin
+  Timestamp: Aug 13 16:38:51 2026
+  MD5 sum:   a3ad62cf62a71c24b580cef867e706cf
 ```
+
+For the current *project* (not shown by `info`), use `emctl project` rather
+than grepping the config file. The config's `emerson_project` key was
+`emerson_model` in older installs — same slot, and it should match the
+project name test suites pass to `run_project`/`--project`, e.g. `stm32f030r8`.
 
 ## Mental model / lifecycle
 
@@ -29,6 +37,7 @@ emerson load ./flash.bin   # start the emerson-server container with a firmware 
 emctl start                # start an emulator *session* for the configured project (paused at reset)
 emctl go / step / ...      # drive execution, inspect state
 emctl stop                 # end the session (container keeps running)
+emerson exec ...           # run a command inside the running container (bash, python3, etc.)
 emerson server keeps running until the container is stopped/removed
 ```
 
@@ -39,16 +48,24 @@ A running Docker container (`emerson-server`) is a prerequisite for every `emctl
 ```
 emerson install [--force-license-key] [--force-pull]   # set up PATH/symlinks, license, pull image
 emerson load <firmware-file>                            # start emerson-server container w/ firmware
+emerson exec [command [args]]                           # run a command in emerson-server (bash if omitted)
 emerson update                                          # update the emerson/emctl scripts themselves
 emerson update-image <tarball>                          # docker load a tarball, restart server from it
 emerson cleanup                                         # remove old images loaded by install/update-image
 emerson license set [KEY]                               # store/overwrite license key (prompts if omitted)
 emerson license show                                    # show whether a key is stored (never prints it)
 emerson version                                         # print installed emerson version
+emerson info                                            # version, image, container status, loaded firmware
 emerson help
 ```
 
-Every command except `install`/`update`/`update-image`/`cleanup`/`version`/`help` checks for a newer release and nags to run `emerson update` if one exists.
+`emerson exec` is the supported way to run something inside the `emerson-server`
+container (`emerson exec` alone opens an interactive bash shell; add a command
+and args to run it directly, e.g. `emerson exec python3 -c "..."`; stdin is
+forwarded, so `emerson exec python3 -` works for piping in a script). Prefer it
+over raw `docker exec ... emerson-server ...`.
+
+Every command except `install`/`update`/`update-image`/`cleanup`/`version`/`info`/`help` checks for a newer release and nags to run `emerson update` if one exists.
 
 ## `emctl` — runtime control commands
 
