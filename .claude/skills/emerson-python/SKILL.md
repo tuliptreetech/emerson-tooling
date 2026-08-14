@@ -17,19 +17,18 @@ running (`emerson load ...`) and normally a project session started (`emctl star
 ## Getting a Python shell
 
 The library only exists inside the container — there's nothing to `pip install`
-on the host. Get to it with `docker exec` against the `emerson-server` container
-(same container `emctl` itself execs into):
+on the host. Get to it with `emerson exec` (the host lifecycle tool's
+convenience wrapper around `docker exec` into `emerson-server`, same container
+`emctl` itself execs into):
 
 ```sh
-docker exec -it emerson-server bash        # interactive shell, then: python3
-docker exec emerson-server python3 -c "import emerson; help(emerson)"   # one-liner
-docker exec -i emerson-server python3 - < local_script.py               # run a host-side script without copying it in
+emerson exec                                        # interactive shell, then: python3
+emerson exec python3 -c "import emerson; help(emerson)"   # one-liner
+emerson exec python3 - < local_script.py                  # run a host-side script without copying it in (stdin is forwarded)
 ```
 
-Check `emerson help` for a more direct way before reaching for raw `docker exec`
-— a convenience subcommand for running a local Python script inside the
-container (e.g. `emerson run-script`/`emerson python`) may have landed since
-this was written; if so, prefer it and update this doc with the real name/flags.
+Equivalent raw `docker exec -it/-i emerson-server ...` forms still work, but
+`emerson exec` is the supported entry point — prefer it.
 
 ## Discovering the API
 
