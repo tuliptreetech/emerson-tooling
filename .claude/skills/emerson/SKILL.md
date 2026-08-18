@@ -83,11 +83,13 @@ Full built-in reference: `emctl --help` (only works while `emerson-server` is ru
 **Execution control**
 - `emctl go [counter]` — resume; optional hex tick count to run until
 - `emctl pause`
-- `emctl step [n]` — step n instructions (decimal or `0x` hex), default 1
+- `emctl step [n]` — step n instructions (decimal or `0x` hex), default 1.
+  **Returns before the step finishes** — see the gotcha below before reading
+  state afterwards.
 - `emctl reset` — reset to initial state
 
 **Status**
-- `emctl state` — `Running` / `Paused` / `HaltedOnError`
+- `emctl state` — prints `running`, `paused`, or `halted on error`. All lowercase, and the last one is spaced, not camel-cased — match it exactly if a script compares against it.
 - `emctl ticks` — current tick counter (hex)
 
 **Device tree** (paths are absolute, e.g. `/PXA270`, `/PXA270/core0`, `/system/uart0`)
@@ -156,6 +158,17 @@ emctl stop
 - `action` vs top-level commands: an unrecognized top-level verb is a hard error, never silently treated as a device action — you must type `emctl action <path> <verb>` explicitly. Use `emctl actions <path>` first to see what a device supports.
 - `snap load <name>` takes the snapshot name *without* the `.snap` extension.
 - `sp` (stoppoint) halts the emulator *after* the access completes, unlike a breakpoint which halts before executing.
+- **`emctl step` returns before the step has finished.** It dispatches the command and exits while the emulator is still executing, so anything you read immediately afterwards may be sampled mid-step. Poll `emctl state` until it reports `paused` before inspecting:
+
+  ```bash
+  emctl step 2000000
+  until [ "$(emctl state)" = "paused" ]; do sleep 1; done
+  emctl ticks   # only now is this a settled value
+  ```
+
+  Small steps hide this: they finish faster than the next `docker exec` round trip (~250 ms), so `emctl step 100` looks perfectly synchronous. Scale up and it stops being. Measured on `stm32f030r8` 1.0.7 — after `emctl step 2000000` the call returned in 284 ms, `emctl state` reported `running`, and three successive `emctl ticks` gave `0x407a5`, `0x62e6d`, `0x8032d`. After polling to `paused`, three reads all gave `0x3d3075`.
+
+  This bites hardest when you read **two or more** locations per step and compare them: each read lands at a different point in emulated time, so a correlation between two counters can be destroyed (or manufactured) by the sampling alone. Tracked as [emerson-issues#11](https://github.com/tuliptreetech/emerson-issues/issues/11).
 - `emerson update` only refreshes the `emerson`/`emctl` host scripts, not the running Docker image — use `emerson update-image <tarball>` for that.
 
 ## Scripting beyond `emctl`

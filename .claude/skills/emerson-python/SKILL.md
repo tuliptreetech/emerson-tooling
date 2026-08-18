@@ -47,7 +47,9 @@ reference. Module lives at
   `(session_id, name)` pairs), `attach(session_id)` → `Machine` (context
   manager; auto-detaches on exit).
 - **`Machine`** — the live emulator: `go()`, `step(n)` (ticks, not
-  instructions), `step_back(n)` (needs checkpointing), `pause()`, `reset()`,
+  instructions; **returns before the step completes — pair it with `wait()`**),
+  `wait()` (blocks until the machine is no longer running),
+  `step_back(n)` (needs checkpointing), `pause()`, `reset()`,
   `state`/`is_paused()`/`is_running()`/`is_halted_on_error()`/`ignore_error()`,
   `tick_count`/`get_tick_counter()`, `go_to_counter(count)`,
   `get_device(path)` / `get_device_tree_paths()`, brokers
@@ -89,10 +91,18 @@ with EmulatorController("http://localhost:10314").connect() as conn:
         gpioa = machine.get_device("/MEM/gpioa")
         print(gpioa.get_common_registers())
 
-        # poll a register until a bit sets, instead of many `emctl r` calls
-        while machine.is_paused():
-            machine.step(1000)
-        print(machine.state)
+        # Walk forward in fixed increments, sampling as you go. step() returns
+        # while the machine is still executing, so wait() before every read --
+        # without it the two get_register calls below land at different points
+        # in emulated time and their relationship is meaningless.
+        tim1 = machine.get_device("/MEM/tim1")
+        tim3 = machine.get_device("/MEM/tim3")
+        for _ in range(40):
+            machine.step(8000)
+            machine.wait()
+            cnt1 = int(tim1.get_register("CNT").value)
+            cnt3 = int(tim3.get_register("CNT").value)
+            print(cnt1, cnt3)
 
         print(machine.read_from_broker if False else machine.get_broker_history("tty0"))
 ```
@@ -123,5 +133,36 @@ Reach for the Python API when you need:
 - `Machine.step(n)` steps **ticks**, not instructions — that's a different
   unit than `emctl step [n]` (instructions). Don't assume parity between the
   two.
+- **`Machine.step(n)` returns before the step has finished.** It dispatches the
+  command and returns while the emulator is still executing, and the overrun
+  scales with `n`. Call `machine.wait()` after every `step()` before reading
+  anything:
+
+  ```python
+  machine.step(8000)
+  machine.wait()          # without this the reads below are racy
+  value = int(dev.get_register("CNT").value)
+  ```
+
+  Small steps hide it — they finish faster than the next HTTP round trip, so a
+  script written against `step(500)` behaves perfectly and the same script at
+  `step(8000)` is quietly wrong. There is no error and nothing in the return
+  value to indicate it. Measured on `stm32f030r8` 1.0.7, reading the *same*
+  register three times immediately after `step()`:
+
+  ```
+  step=500 :  32434  32434  32434   spread=0
+  step=8000:  40934  44434  44934   spread=4000
+  ```
+
+  The damage is worst when a single sample reads **two or more** locations and
+  compares them: each read is taken at a different point in emulated time, so
+  reversing the read order flips the sign of the difference between two
+  counters. That is enough to make two perfectly synchronised counters look
+  independent — it has already produced one spurious emulator bug report.
+  Tracked as [emerson-issues#11](https://github.com/tuliptreetech/emerson-issues/issues/11).
+
+  `emctl step` has the same behaviour, with no `wait` subcommand — poll
+  `emctl state` until `paused` instead (see the [emerson skill](../emerson/SKILL.md)).
 - `step_back` requires checkpointing enabled (`enable_checkpointing()`) —
   same requirement as `emctl checkpoint enable`.
