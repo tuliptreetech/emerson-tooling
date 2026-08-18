@@ -118,10 +118,10 @@ Reach for the Python API when you need:
 - Many reads/actions combined in one process instead of N separate `docker exec`
   round-trips.
 - Capabilities `emctl` doesn't surface at all: `step_back`, `run_command_string`,
-  `await_debugger_event`/`await_serial_event`, direct snapshot bytes
-  (`get_current_snapshot`/`load_snapshot_from_bytes`).
+  `await_debugger_event`/`await_serial_event` (see Gotchas), direct snapshot
+  bytes (`get_current_snapshot`/`load_snapshot_from_bytes`).
 - Parsing broker/UART output programmatically rather than eyeballing raw bytes
-  from `emctl broker <name>`.
+  from `emctl broker <name>` (see Gotchas for which broker method to use).
 
 ## Gotchas
 
@@ -166,3 +166,38 @@ Reach for the Python API when you need:
   `emctl state` until `paused` instead (see the [emerson skill](../emerson/SKILL.md)).
 - `step_back` requires checkpointing enabled (`enable_checkpointing()`) —
   same requirement as `emctl checkpoint enable`.
+- **A session leaked by a crashed script (no `stop_project`) stalls a new one
+  on the same project.** The new session still reports `state: Running` and a
+  normally-climbing `tick_count`, but the machine makes no real progress
+  (e.g. `pc` stays pinned) — no error is raised anywhere. Always clear
+  existing sessions before starting, and stop your own in `finally`:
+
+  ```python
+  with EmulatorController(host).connect() as conn:
+      for session_id, _ in conn.get_instance_list():
+          conn.stop_project(session_id)
+      session_id = conn.run_project(project)
+      try:
+          with conn.attach(session_id) as machine:
+              ...
+      finally:
+          conn.stop_project(session_id)
+  ```
+- **Prefer `get_broker_history` over `read_from_broker`.** The latter has
+  been observed returning `b""` for data that was in fact already written and
+  that `get_broker_history` returned correctly moments later. Use
+  `get_broker_history` for anything that needs to reliably see broker output.
+- **`await_serial_event()`/`await_debugger_event()` need a running asyncio
+  event loop** despite their plain synchronous signature — calling them from
+  an ordinary script raises `RuntimeError: no running event loop` (often
+  reported against an unrelated later line). For a bounded wait on broker
+  output, poll instead:
+
+  ```python
+  import time
+  deadline = time.monotonic() + timeout_s
+  data = b""
+  while time.monotonic() < deadline and not data:
+      data = bytes(machine.get_broker_history(broker_name))
+      time.sleep(0.5)
+  ```
