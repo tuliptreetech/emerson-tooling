@@ -33,7 +33,8 @@ project name test suites pass to `run_project`/`--project`, e.g. `stm32f030r8`.
 
 ```
 emerson install            # one-time: PATH+symlinks, license, pull docker image
-emerson load ./flash.bin   # start the emerson-server container with a firmware image
+emerson peripherals pull   # optional: pull .emerson/peripherals.yaml, trim to devices you care about
+emerson load ./flash.bin   # start the emerson-server container with a firmware image (mounts peripherals.yaml if present)
 emctl start                # start an emulator *session* for the configured project (paused at reset)
 emctl go / step / ...      # drive execution, inspect state
 emctl stop                 # end the session (container keeps running)
@@ -47,7 +48,8 @@ A running Docker container (`emerson-server`) is a prerequisite for every `emctl
 
 ```
 emerson install [--force-license-key] [--force-pull]   # set up PATH/symlinks, license, pull image
-emerson load <firmware-file>                            # start emerson-server container w/ firmware
+emerson peripherals pull [--force] [--catalog-only]     # pull the project's peripherals.yaml + I2C catalog from the image
+emerson load <firmware-file>                            # start emerson-server container w/ firmware (mounts .emerson/peripherals.yaml if present)
 emerson exec [command [args]]                           # run a command in emerson-server (bash if omitted)
 emerson update                                          # update the emerson/emctl scripts themselves
 emerson update-image <tarball>                          # docker load a tarball, restart server from it
@@ -66,6 +68,40 @@ forwarded, so `emerson exec python3 -` works for piping in a script). Prefer it
 over raw `docker exec ... emerson-server ...`.
 
 Every command except `install`/`update`/`update-image`/`cleanup`/`version`/`info`/`help` checks for a newer release and nags to run `emerson update` if one exists.
+
+## I2C peripherals (`.emerson/peripherals.yaml`)
+
+`emerson peripherals pull` reads the current project's peripheral config and
+I2C catalog straight out of the loaded Docker image — no running container or
+session needed. It writes `.emerson/peripherals.yaml` in the current
+directory (fails if one's already there; pass `--force` to overwrite). Pass
+`--catalog-only` to just print the available native kinds without writing
+anything.
+
+The written file lists, per I2C controller device-tree path (e.g.
+`/MEM/i2c1`), every device currently attached plus a comment block of native
+kinds that controller accepts:
+
+```yaml
+/MEM/i2c1:
+  - name: bq25892
+    address: 0x6B
+    native: bq25892
+  - name: max17043
+    address: 0x36
+    native: max17043
+  - name: eeprom
+    address: 0x50
+    native: at24c256
+```
+
+Each entry needs `name`, `address` (hex), and either `native: <kind>` (one of
+the catalog kinds for that controller) or `path: <python-file>` for a custom
+target. **To scope the emulated bus down to only the devices you care about,
+edit this file directly** — delete the entries you don't need, keep/add the
+ones you do. `emerson load` automatically mounts `.emerson/peripherals.yaml`
+into the container when it's present in the cwd, so edits take effect on the
+next `emerson load` (+ `emctl start`); no need to re-pull or rebuild anything.
 
 ## `emctl` — runtime control commands
 
