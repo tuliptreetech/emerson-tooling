@@ -156,8 +156,8 @@ Full built-in reference: `emctl --help` (only works while `emerson-server` is ru
 - `emctl pc <path>` / `emctl ic <path>` — program/instruction counter (CPU only)
 - `emctl details <path>` — kind, memory, registers
 - `emctl u <path>` / `emctl ui <path>` — disassemble next 10 instrs at PC (`ui` adds p-code)
-- `emctl read-mem <path> <addr> <len> [-w N] [-o FILE]` — hex dump or raw write to FILE; `-w` groups into N-byte little-endian words
-- `emctl write-mem <path> <addr> (<hex>|--file FILE|--string STR)`
+- `emctl read-mem <path> <addr> <len> [-w N] [-o FILE]` — hex dump or raw write to FILE; `-w` groups into N-byte little-endian words. **`<addr>` is relative to `<path>`'s own base, not an absolute system address** — e.g. `emctl read-mem /MEM/sram 0x484 4` (offset into that 0x2000-byte device), not `0x20000484`; the latter errors "out of range" against the device's own (small) size. The one path where relative-to-base and absolute happen to coincide is the CPU (`/Cortex-M0` or similar) — its address space starts at 0 and covers the whole system, so full linked addresses (from an ELF's symbol table, vector table, etc.) can be passed straight through: `emctl read-mem /Cortex-M0 0x20000490 4`.
+- `emctl write-mem <path> <addr> (<hex>|--file FILE|--string STR)` — same relative-to-`<path>` addressing as `read-mem`.
 
 **Breakpoints / watchpoints / stoppoints** (require `<path>`)
 - `bp <path> [addr]`, `bpd <path> <id>`, `enable <path> <id>`, `disable <path> <id>`
@@ -206,6 +206,53 @@ emctl stop
 
   This bites hardest when you read **two or more** locations per step and compare them: each read lands at a different point in emulated time, so a correlation between two counters can be destroyed (or manufactured) by the sampling alone. Tracked as [emerson-issues#11](https://github.com/tuliptreetech/emerson-issues/issues/11).
 - `emerson update` only refreshes the `emerson`/`emctl` host scripts, not the running Docker image — use `emerson update-image <tarball>` for that.
+
+## Debugging firmware state without instrumentation
+
+Prefer breakpoints + direct register/memory inspection over adding temporary
+`printf`/UART logging to the firmware under test. It's faster to iterate
+(no rebuild-reflash cycle per guess), and it doesn't risk the debug code
+itself perturbing timing-sensitive behavior (watchdogs, bus timeouts) you're
+trying to diagnose.
+
+General recipe for "is this C global/struct field what I expect it to be right
+now":
+
+1. **Find the address.** Symbols aren't loaded into `emctl` — get them from the
+   ELF instead: `arm-none-eabi-nm build/firmware.elf | grep -i <symbol>`. For a
+   struct field (e.g. `hi2c1.ErrorCode`), `nm` only gives you the struct's base
+   address; add the field's byte offset by hand from the struct's typedef
+   (count each member's size, respecting natural alignment — e.g. on a Cortex-M0
+   `HAL_StatusTypeDef`/enum members are 4 bytes, pointers are 4 bytes, and a
+   `uint16_t` pair packs into 4 bytes without padding). Recompute this offset
+   fresh after any rebuild if the struct layout could plausibly have changed —
+   but note **the addresses of file-scope globals themselves can also shift
+   between rebuilds** (a change elsewhere in the same translation unit,
+   or even in an unrelated file, can shift `.bss`/`.data` layout), so re-run
+   `nm` for the base symbol after every rebuild rather than assuming it's
+   stable — don't just reuse offsets computed against a stale build.
+2. **Set a breakpoint past the code you care about**, e.g. at the entry of the
+   next function called after it (`emctl bp /Cortex-M0 <addr>`), then
+   `emctl go` and wait for `emctl state` to report `paused`.
+3. **Read the value** with `emctl read-mem /Cortex-M0 <addr> <len>` (see the
+   `read-mem` addressing note above — use the CPU device path so linked/ELF
+   addresses work unmodified). Sanity-check the technique on a known-good
+   value first if the result looks surprising (e.g. read a handle's
+   `Instance` pointer field and confirm it equals the peripheral's known base
+   address, like `0x40005400` for `I2C1` on an F0) before trusting a field
+   you don't have an independent way to verify.
+
+Worked example: an I2C driver was silently failing (no errors surfaced, but
+nothing appeared on a simulated OLED). Rather than adding `printf` calls,
+`arm-none-eabi-nm` found `hi2c1`/`hi2c2` (`I2C_HandleTypeDef` handles), a
+breakpoint was set just after the failing calls, and `read-mem` on each
+handle's `ErrorCode` field (offset 76 into the struct: `Instance` (4) +
+`Init` (8 × `uint32_t` = 32) + `pBuffPtr` (4) + `XferSize`+`XferCount`
+(2+2) + `XferOptions` (4) + `PreviousState` (4) + `XferISR` (4) + `hdmatx`
+(4) + `hdmarx` (4) + `Lock` (4) + `State` (4) + `Mode` (4) = 76) showed
+`0x00000004` — `HAL_I2C_ERROR_AF` (ack failure). That pointed straight at an
+electrical cause (missing GPIO pull-ups on the I2C pins) instead of a
+protocol/logic bug, without touching the firmware at all.
 
 ## Scripting beyond `emctl`
 
