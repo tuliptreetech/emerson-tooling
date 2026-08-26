@@ -151,7 +151,7 @@ Full built-in reference: `emctl --help` (only works while `emerson-server` is ru
 - `emctl os ps` / `os set <pid>` / `os unset` / `os maps [pid]` / `os modules` / `os regs [pid]` / `os scan`
 
 **Per-device** (require `<path>`)
-- `emctl r <path> [reg]` — print registers, or one; `emctl r <path> <reg> <val>` to set (val can be a number or another register name)
+- `emctl r <path> [reg]` — print registers, or one; `emctl r <path> <reg> <val>` to set (val can be a number or another register name). **Prefer this over `read-mem`/`write-mem` for named peripheral registers** (GPIO MODER/PUPDR/IDR/ODR, timers, etc.) — `emctl r <path>` with no reg lists every named register on that device, so there's no need to hand-compute byte offsets the way `read-mem`/`write-mem` require. Reserve `read-mem`/`write-mem` for genuinely address-based memory (SRAM/flash contents, GDDRAM-style framebuffers) that has no named-register abstraction.
 - `emctl registers <path>` — all registers
 - `emctl pc <path>` / `emctl ic <path>` — program/instruction counter (CPU only)
 - `emctl details <path>` — kind, memory, registers
@@ -206,6 +206,7 @@ emctl stop
 
   This bites hardest when you read **two or more** locations per step and compare them: each read lands at a different point in emulated time, so a correlation between two counters can be destroyed (or manufactured) by the sampling alone. Tracked as [emerson-issues#11](https://github.com/tuliptreetech/emerson-issues/issues/11).
 - `emerson update` only refreshes the `emerson`/`emctl` host scripts, not the running Docker image — use `emerson update-image <tarball>` for that.
+- **GPIO register writes that change pin drive are rejected outright**, via either `write-mem` or `emctl r <path> <reg> <val>` — e.g. clearing `PUPDR` bits to fake a broken pull-up/corroded connector fails with `Error while writing to device gpiob: a write here changes what the pins drive onto the external circuit`. This is a deliberate guardrail (the emulator models the electrical consequence of the write), not a bug, and it isn't bypassed by using one command over the other. There's no supported way to fault-inject at the raw GPIO/bus-electrical level for this board; use a peripheral's own `emctl actions <path>` fault-injection verbs instead (e.g. bq25892's `inject_fault ntc_hot/ntc_cold/...`) to simulate a damaged/glitching sensor.
 
 ## Debugging firmware state without instrumentation
 
