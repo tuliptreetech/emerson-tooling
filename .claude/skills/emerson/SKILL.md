@@ -132,6 +132,7 @@ Full built-in reference: `emctl --help` (only works while `emerson-server` is ru
 - `emctl ls [path]` — list children (default `/`)
 - `emctl find [path]` — device tree as JSON
 - `emctl dump` — all devices + common register values
+- `emctl connections` — list inter-device port/pin/net wiring, e.g. `gpioc.pin0.in -> /MEM/i2c1/charger.int` or an IRQ line into the NVIC. Peripheral-pin wiring is declared per-device in `.emerson/peripherals.yaml` under a `pins:` map (e.g. `pins: { int: { device: "/MEM/gpioc", pin: 0 } }`) and shows up here once configured. **A connection listed here is not proof the device model actually drives that pin** — on this board (Emerson 1.0.11), `charger.int`/`fuel_gauge.alrt` are wired to `gpioc.pin0`/`pin2` per this command, but triggering the condition (`inject_fault`, `set_soc` past the alert threshold) never moved the target GPIO's `IDR`, confirmed by a breakpoint on the firmware's fault-handling code never firing early (tracked as [emerson-issues#17](https://github.com/tuliptreetech/emerson-issues/issues/17)). Verify pin-level effects by reading the destination GPIO's `IDR` after triggering the condition, not just by checking `connections` output.
 
 **Snapshots**
 - `emctl snap` / `emctl snap save [name]` / `emctl snap load <name>` (name = timestamp if omitted; no `.snap` extension in `load`)
@@ -159,10 +160,11 @@ Full built-in reference: `emctl --help` (only works while `emerson-server` is ru
 - `emctl read-mem <path> <addr> <len> [-w N] [-o FILE]` — hex dump or raw write to FILE; `-w` groups into N-byte little-endian words. **`<addr>` is relative to `<path>`'s own base, not an absolute system address** — e.g. `emctl read-mem /MEM/sram 0x484 4` (offset into that 0x2000-byte device), not `0x20000484`; the latter errors "out of range" against the device's own (small) size. The one path where relative-to-base and absolute happen to coincide is the CPU (`/Cortex-M0` or similar) — its address space starts at 0 and covers the whole system, so full linked addresses (from an ELF's symbol table, vector table, etc.) can be passed straight through: `emctl read-mem /Cortex-M0 0x20000490 4`.
 - `emctl write-mem <path> <addr> (<hex>|--file FILE|--string STR)` — same relative-to-`<path>` addressing as `read-mem`.
 
-**Breakpoints / watchpoints / stoppoints** (require `<path>`)
-- `bp <path> [addr]`, `bpd <path> <id>`, `enable <path> <id>`, `disable <path> <id>`
-- `wp <path> [read|write <reg|addr>]`, `wpd <path> <id>`
-- `sp <path> [read|write <reg|addr>|fetch <addr>]` — halts *after* the access; `spd <path> <id>`
+**Breakpoints / watchpoints / stoppoints** (require `<path>`) — see the dedicated
+section below for semantics, id scoping, and a real deletion bug to watch for.
+- `bp <path> [addr]` — fetch breakpoint, **CPU devices only**; halts *before* the instruction runs. `bpd <path> <id>`, `enable <path> <id>`, `disable <path> <id>`.
+- `wp <path> [read|write <reg|addr>]` — watchpoint; records the access (`hit=` counter) but **never halts** the machine. `wpd <path> <id>`.
+- `sp <path> [read|write <reg|addr>|fetch <addr>]` — stoppoint; halts *after* the access completes. `spd <path> <id>`.
 
 **Custom device actions** (board/peripheral models expose their own verbs)
 - `emctl actions <path>` — list verbs + usage
@@ -186,6 +188,81 @@ emctl go
 emctl logs -f                  # Ctrl+C to stop streaming
 emctl stop
 ```
+
+## Breakpoints, watchpoints, and stoppoints — which to use
+
+All three require a device tree `<path>` (`emctl ls`/`find` to locate one). What
+they have in common: creating one prints `id=N`; listing (`bp`/`wp`/`sp` with no
+further args) shows `id=N [Type] {...} (access) [REG] enabled hit=N`; `hit=`
+only increments on a genuine access made *by the emulated CPU/bus* — see the
+gotcha below, host-side pokes don't count. IDs are scoped **per device path**,
+and `wp`/`sp` share one counter on a given path (e.g. on `/MEM/crc`, a `wp`
+then an `sp` then another `wp` came back `id=0`, `id=1`, `id=2`); a different
+device path starts its own counter at 0. Confirmed on Emerson 1.0.10.
+
+Pick by what you're trying to catch:
+
+- **`bp` (breakpoint)** — you know *which instruction* you want to stop at
+  (an ELF symbol, a disassembled address) and want execution to stop *before*
+  it runs. CPU devices only (`/Cortex-M0`) — pointing `bp` at a peripheral
+  errors `this device does not have address break points`. Best for "stop
+  when this function/line is reached," regardless of what data it's about to
+  touch.
+- **`wp` (watchpoint)** — you want to know *whether/how often* a register or
+  address is touched, without perturbing timing. It never halts the machine,
+  so it's safe to leave armed across a timing-sensitive stretch (watchdogs,
+  bus timeouts) and check the `hit=` counter afterwards. Good for "is this
+  register even read by the firmware" before spending time on a real
+  breakpoint hunt.
+- **`sp` (stoppoint)** — you want a hard stop *right after* a specific
+  register/address is read, written, or fetched, but don't know (or don't
+  want to hunt for) which instruction does it. Halts after the access
+  completes, so the access has already happened when you inspect state —
+  read the *new* value, not the pre-access one. Good for catching the first
+  unexpected write to a region, or the exact moment a peripheral register
+  changes during a fault-injection run (see custom device actions above,
+  e.g. bq25892's `inject_fault`).
+
+Confirmed by testing on this project's session (`stm32f030r8`, Emerson
+1.0.10):
+
+- A CPU-register watchpoint (`emctl wp /Cortex-M0 read r0`) accumulated real
+  hits just from normal execution (`hit=5` within a second, since r0 is
+  touched on nearly every call/return) — watchpoints do track genuine guest
+  activity, not just theoretically.
+- **Host-initiated register writes don't trigger wp/sp.** Arming
+  `sp /MEM/crc write POL` and then writing that same register from the host
+  via `emctl r /MEM/crc POL 0x7` left `hit=0` and the machine `running` —
+  the stoppoint only fires on an access driven by the emulated CPU/bus, not
+  on a debug-interface poke from `emctl r`/`write-mem`. Don't use `emctl r`
+  to "test" that a stoppoint is wired up; you have to make the firmware do
+  the access.
+- **`sp` on a CPU device genuinely halts the machine** — arming
+  `sp /Cortex-M0 read r0` then `emctl go` came back `paused` almost
+  immediately (r0 is touched on nearly every call/return), confirming a
+  stoppoint really stops execution rather than just logging. But **it can
+  overshoot**: the `hit=` counter read right after the halt was `3` one run
+  and `5` on a repeat, not `1` — a few extra matching accesses can happen
+  before the halt is actually enforced, the same class of async/batching lag
+  as the documented `step`-returns-early gotcha. Don't assume you're stopped
+  at the *first* matching access; check `hit=` and treat a low overshoot as
+  normal. (A stoppoint armed on a peripheral register — `/MEM/i2c1` `ISR`
+  read — was left running for several minutes of wall-clock time without
+  ever firing in this session; it's unclear whether that's because the
+  firmware simply wasn't touching that register in that stretch, or a
+  peripheral-specific quirk, so treat peripheral-scoped `sp` as unverified to
+  actually halt until you've seen it happen for your own case.)
+- **`wpd`/`spd`/`enable`/`disable` don't work against watchpoints or
+  stoppoints set on a non-CPU peripheral device.** Creating and listing a
+  `wp`/`sp` on a peripheral path (e.g. `/MEM/crc`, `/MEM/i2c1`) works fine,
+  but deleting or disabling that same id errors
+  `this device does not have debug points` — even though the id clearly
+  exists in the `wp`/`sp` listing. The identical operation against a
+  `/Cortex-M0`-scoped watchpoint (by id) deleted cleanly. No workaround was
+  found short of ending the session (`emctl stop` + `emctl start`); a stray
+  peripheral watch/stoppoint is otherwise harmless to leave in place (`wp`
+  never halts, and an un-hit `sp` never halts either), but budget for not
+  being able to remove it mid-session.
 
 ## Gotchas
 
