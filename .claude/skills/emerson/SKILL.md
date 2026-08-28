@@ -48,18 +48,29 @@ A running Docker container (`emerson-server`) is a prerequisite for every `emctl
 
 ```
 emerson install [--force-license-key] [--force-pull]   # set up PATH/symlinks, license, pull image
-emerson peripherals pull [--force] [--catalog-only]     # pull the project's peripherals.yaml + I2C catalog from the image
+emerson peripherals pull [path] [--force] [--catalog-only]  # pull the project's peripherals.yaml + I2C catalog from the image
+emerson peripherals clear                               # clear the stored peripherals.yaml override so 'load' falls back to the image default (doesn't delete the file)
 emerson load <firmware-file>                            # start emerson-server container w/ firmware (mounts .emerson/peripherals.yaml if present)
 emerson exec [command [args]]                           # run a command in emerson-server (bash if omitted)
+emerson shutdown                                        # tell the running emerson-server to shut down (host-side wrapper around emctl shutdown)
 emerson update                                          # update the emerson/emctl scripts themselves
-emerson update-image <tarball>                          # docker load a tarball, restart server from it
-emerson cleanup                                         # remove old images loaded by install/update-image
+emerson cleanup                                         # remove old downloaded emerson/emctl script versions from ~/.emerson/downloads (NOT docker images — see 'image cleanup')
+emerson image update <tarball>                          # docker load a tarball, restart server from it (was 'emerson update-image')
+emerson image cleanup                                   # remove old Docker images loaded by install/'image update' (this is what 'cleanup' used to do)
 emerson license set [KEY]                               # store/overwrite license key (prompts if omitted)
 emerson license show                                    # show whether a key is stored (never prints it)
+emerson skills pull                                     # download the latest Emerson Claude Code skills into .claude/skills in the cwd, overwriting what's there
 emerson version                                         # print installed emerson version
 emerson info                                            # version, image, container status, loaded firmware
 emerson help
 ```
+
+**Renamed/reshuffled from older versions of this doc:** `emerson update-image` is
+now `emerson image update <tarball>`. `emerson cleanup` used to remove old
+Docker images — it now removes old downloaded `emerson`/`emctl` *script*
+versions from `~/.emerson/downloads`; the old cleanup-old-images behavior
+moved to the new `emerson image cleanup`. If you want to reclaim disk space
+from stale Docker images, use `image cleanup`, not `cleanup`.
 
 `emerson exec` is the supported way to run something inside the `emerson-server`
 container (`emerson exec` alone opens an interactive bash shell; add a command
@@ -67,7 +78,7 @@ and args to run it directly, e.g. `emerson exec python3 -c "..."`; stdin is
 forwarded, so `emerson exec python3 -` works for piping in a script). Prefer it
 over raw `docker exec ... emerson-server ...`.
 
-Every command except `install`/`update`/`update-image`/`cleanup`/`version`/`info`/`help` checks for a newer release and nags to run `emerson update` if one exists.
+Every command except `install`/`update`/`image`/`cleanup`/`version`/`info`/`help` checks for a newer release and nags to run `emerson update` if one exists.
 
 ## I2C peripherals (`.emerson/peripherals.yaml`)
 
@@ -103,6 +114,17 @@ ones you do. `emerson load` automatically mounts `.emerson/peripherals.yaml`
 into the container when it's present in the cwd, so edits take effect on the
 next `emerson load` (+ `emctl start`); no need to re-pull or rebuild anything.
 
+`peripherals pull` takes an optional `[path]` (a directory gets
+`peripherals.yaml` appended); either way it also points Emerson's stored
+peripherals reference at that file for `emerson load` to pick up. To go back
+to the image's default peripherals instead of your override, run
+`emerson peripherals clear` — it clears the stored reference but does not
+delete the override file itself.
+
+To inspect the catalog/current peripherals from inside a running container
+without needing a started project *session*, use `emctl peripherals` — see
+the runtime section below.
+
 ## `emctl` — runtime control commands
 
 Full built-in reference: `emctl --help` (only works while `emerson-server` is running; see Non-interactive note below). Global options: `--host HOST` (default `http://localhost:10314`), `--project NAME` (else `$EMERSON_PROJECT`, else `~/.emerson/config`).
@@ -110,6 +132,7 @@ Full built-in reference: `emctl --help` (only works while `emerson-server` is ru
 **Config**
 - `emctl project` — print current default project
 - `emctl set-project [name]` — set default project (interactive picker if omitted)
+- `emctl peripherals` — print the I2C peripheral catalog and the project's current `peripherals.yaml`; reads static config, so no `emctl start` session is needed (just the container running)
 
 **Session/server management**
 - `emctl start` — start a new session for the project (only command, besides `stop`/`shutdown`, that works with no session yet)
@@ -158,7 +181,12 @@ Full built-in reference: `emctl --help` (only works while `emerson-server` is ru
 - `emctl details <path>` — kind, memory, registers
 - `emctl u <path>` / `emctl ui <path>` — disassemble next 10 instrs at PC (`ui` adds p-code)
 - `emctl read-mem <path> <addr> <len> [-w N] [-o FILE]` — hex dump or raw write to FILE; `-w` groups into N-byte little-endian words. **`<addr>` is relative to `<path>`'s own base, not an absolute system address** — e.g. `emctl read-mem /MEM/sram 0x484 4` (offset into that 0x2000-byte device), not `0x20000484`; the latter errors "out of range" against the device's own (small) size. The one path where relative-to-base and absolute happen to coincide is the CPU (`/Cortex-M0` or similar) — its address space starts at 0 and covers the whole system, so full linked addresses (from an ELF's symbol table, vector table, etc.) can be passed straight through: `emctl read-mem /Cortex-M0 0x20000490 4`.
-- `emctl write-mem <path> <addr> (<hex>|--file FILE|--string STR)` — same relative-to-`<path>` addressing as `read-mem`.
+- `emctl write-mem <path> <addr> (<hex>|--file FILE|--string STR)` — same relative-to-`<path>` addressing as `read-mem`. **Memory devices only** (RAM/ROM/flash) — it writes fixed-width words sized to whatever device sits at `<addr>`, which isn't a real MMIO access path; a payload that overruns the target keeps writing into whatever's mapped next. For hardware registers, use `emctl r <path> <reg> <val>` instead.
+- `emctl db <path> <addr> [count]` — read-only alternate to `read-mem` via the raw command language; hex/decimal `<addr>`, defaults to 16 bytes, always prints a hex dump (no `-w`/`-o`). Prefer `read-mem` when you want word-grouping or file output.
+- `emctl write <path> <addr> <hex>` — raw-command-language alternate to `write-mem`; `<addr>` may also be a register+offset (e.g. `r1+4`, `r1-4`), but only takes a positional hex string (no `--file`/`--string`). Same memory-device-only caveat as `write-mem`.
+
+**Debugpoints — machine-wide view**
+- `emctl debugpoints [path]` — walks the whole device tree and lists every breakpoint, watchpoint, and stoppoint set anywhere (kind, target, enabled/disabled, hit count, access mode), optionally filtered to devices whose path starts with `<path>`. Devices with none set, or that don't support them, are omitted. Use this to get an overview across devices instead of checking `bp`/`wp`/`sp` one path at a time.
 
 **Breakpoints / watchpoints / stoppoints** (require `<path>`) — see the dedicated
 section below for semantics, id scoping, and a real deletion bug to watch for.
@@ -282,7 +310,7 @@ Confirmed by testing on this project's session (`stm32f030r8`, Emerson
   Small steps hide this: they finish faster than the next `docker exec` round trip (~250 ms), so `emctl step 100` looks perfectly synchronous. Scale up and it stops being. Measured on `stm32f030r8` 1.0.7 — after `emctl step 2000000` the call returned in 284 ms, `emctl state` reported `running`, and three successive `emctl ticks` gave `0x407a5`, `0x62e6d`, `0x8032d`. After polling to `paused`, three reads all gave `0x3d3075`.
 
   This bites hardest when you read **two or more** locations per step and compare them: each read lands at a different point in emulated time, so a correlation between two counters can be destroyed (or manufactured) by the sampling alone. Tracked as [emerson-issues#11](https://github.com/tuliptreetech/emerson-issues/issues/11).
-- `emerson update` only refreshes the `emerson`/`emctl` host scripts, not the running Docker image — use `emerson update-image <tarball>` for that.
+- `emerson update` only refreshes the `emerson`/`emctl` host scripts, not the running Docker image — use `emerson image update <tarball>` for that.
 - **GPIO register writes that change pin drive are rejected outright**, via either `write-mem` or `emctl r <path> <reg> <val>` — e.g. clearing `PUPDR` bits to fake a broken pull-up/corroded connector fails with `Error while writing to device gpiob: a write here changes what the pins drive onto the external circuit`. This is a deliberate guardrail (the emulator models the electrical consequence of the write), not a bug, and it isn't bypassed by using one command over the other. There's no supported way to fault-inject at the raw GPIO/bus-electrical level for this board; use a peripheral's own `emctl actions <path>` fault-injection verbs instead (e.g. bq25892's `inject_fault ntc_hot/ntc_cold/...`) to simulate a damaged/glitching sensor.
 
 ## Debugging firmware state without instrumentation
