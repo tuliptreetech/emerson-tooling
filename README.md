@@ -9,6 +9,10 @@ Claude Code skills for working with [Emerson](https://github.com/tuliptreetech/e
 
 ## Using these skills
 
-Copy (or symlink) the `.claude/skills/emerson` and `.claude/skills/emerson-python` directories into your own project's `.claude/skills/` folder. Claude Code will pick them up automatically.
+After you have emerson installed, you can run `emerson skills pull`. That will put these files in the `$cwd/.claude/skills` directory.
+
+Or you can copy (or symlink) the `.claude/skills/emerson` and `.claude/skills/emerson-python` directories into your own project's `.claude/skills/` folder manually.
+
+Claude Code will pick them up automatically.
 
 Questions or issues? Join [Tulip Tree Tech Community](https://tuliptreetechcomm.slack.com) on Slack, or file a bug at [emerson-issues](https://github.com/tuliptreetech/emerson-issues).
