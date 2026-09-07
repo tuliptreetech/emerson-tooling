@@ -123,6 +123,80 @@ Reach for the Python API when you need:
 - Parsing broker/UART output programmatically rather than eyeballing raw bytes
   from `emctl broker <name>` (see Gotchas for which broker method to use).
 
+## Running tests in parallel
+
+The server supports many concurrent sessions of the *same* project, and
+they run genuinely in parallel (not just concurrently-scheduled on one
+core) — measured on `stm32f030r8` 1.0.12: one session doing a fixed amount
+of `step()` work took ~33s; four of those sessions run at once, each in its
+own process, took ~35s total, not ~130s. This is the basis for running a
+test suite's tests concurrently, one emulator session per test, instead of
+booting a fresh session per test *sequentially*.
+
+Two things make this work correctly:
+
+- **Give each concurrent session its own `Connection`.** A single
+  `Connection` can only `attach()` to one session at a time — a second
+  `attach()` on the same `Connection` while another is active raises
+  `RuntimeError: Usage Error: Invalid Connection State`. This is naturally
+  satisfied by `pytest-xdist` (`pytest -n N`): each worker is a separate
+  process, so each ends up with its own `EmulatorController(...).connect()`
+  call and its own `Connection`, as long as your fixture creates the
+  connection itself rather than sharing one across the whole test run.
+
+  ```python
+  # conftest.py -- one Connection, one session, per test
+  @pytest.fixture
+  def machine():
+      with EmulatorController(host).connect() as conn:
+          session_id = conn.run_project(project)
+          try:
+              with conn.attach(session_id) as m:
+                  yield m
+          finally:
+              conn.stop_project(session_id)
+  ```
+
+- **Move leaked-session cleanup out of the per-test fixture.** The naive
+  fixture in the gotcha below (`for session_id, _ in
+  conn.get_instance_list(): conn.stop_project(session_id)` before starting
+  a new one) is correct for a single sequential run, but wrong once tests
+  run concurrently: one worker's setup would stop every *other* worker's
+  in-flight session too. Do that cleanup exactly once, before the
+  (parallel) run starts — e.g. as a separate step in whatever script
+  invokes `pytest`, not inside the fixture itself.
+
+- **Bound worker count to CPUs actually allocated to the container**, not
+  `os.cpu_count()` — that reports the *host's* core count regardless of any
+  `docker run --cpus=N` limit, since Python doesn't consult the cgroup
+  quota. Read it directly instead:
+
+  ```python
+  def allocated_cpus():
+      try:
+          with open("/sys/fs/cgroup/cpu.max") as f:      # cgroup v2
+              quota, period = f.read().split()
+          if quota != "max":
+              return max(1, int(quota) // int(period))
+      except FileNotFoundError:
+          pass
+      try:
+          with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as f:  # cgroup v1
+              quota = int(f.read())
+          with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
+              period = int(f.read())
+          if quota > 0:
+              return max(1, quota // period)
+      except FileNotFoundError:
+          pass
+      return os.cpu_count() or 1  # unrestricted -- fall back to host count
+  ```
+
+See this project's `tests/emerson/conftest.py` and
+`scripts/run_emerson_tests.sh` for a complete working example: `pytest-xdist`
+installed on demand, leaked sessions cleared once up front, worker count
+detected from the container's cgroup, then `pytest -n <N>`.
+
 ## Gotchas
 
 - The package is only inside the container's image — don't try to `pip install
@@ -170,7 +244,11 @@ Reach for the Python API when you need:
   on the same project.** The new session still reports `state: Running` and a
   normally-climbing `tick_count`, but the machine makes no real progress
   (e.g. `pc` stays pinned) — no error is raised anywhere. Always clear
-  existing sessions before starting, and stop your own in `finally`:
+  existing sessions before starting, and stop your own in `finally`. **Caveat
+  when running multiple sessions concurrently (see "Running tests in
+  parallel" above): "clear existing sessions" must happen once, before any
+  of them start** — doing it inside a per-test fixture would stop sibling
+  sessions that are legitimately still in flight, not just leaked ones.
 
   ```python
   with EmulatorController(host).connect() as conn:
