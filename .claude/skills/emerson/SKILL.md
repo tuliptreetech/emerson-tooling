@@ -1,76 +1,162 @@
 ---
 name: Emerson SoC Emulator
-description: Use and control the Emerson hardware/SoC emulator via the `emerson` (lifecycle) and `emctl` (runtime control) commands. Use when the user mentions Emerson, the emulator, emctl, flashing/loading firmware into a simulated chip, or inspecting/stepping/debugging emulated device state (registers, memory, breakpoints, device tree, brokers).
+description: Use and control the Emerson hardware/SoC emulator via the single `emerson` command (`emerson start` / `emerson ctl` / `emerson stop`). Use when the user mentions Emerson, the emulator, emctl, flashing/loading firmware into a simulated chip, or inspecting/stepping/debugging emulated device state (registers, memory, breakpoints, device tree, brokers).
 ---
 
 # Emerson SoC Emulator
 
-Emerson is a Dockerized SoC emulator. Two CLIs, both installed to `~/.local/bin`:
+Emerson is a Dockerized SoC emulator, driven by **one** host command installed
+to `~/.local/bin`: **`emerson`**. It owns the whole lifecycle — installing and
+updating itself, bringing up the `emerson-server` Docker container on a
+firmware image, starting emulation *sessions* on it, and talking to those
+sessions.
 
-- **`emerson`** — host-side lifecycle tool. Installs/updates Emerson, loads a firmware image, starts/stops the `emerson-server` Docker container, and runs commands inside it.
-- **`emctl`** — runtime control tool that talks to the running server (over HTTP, default `http://localhost:10314`). Used to start/stop emulation *sessions*, inspect and mutate device state, set breakpoints, read logs, etc. `emctl` is a thin host wrapper (`emerson/bin/emctl` script, ~38 lines) that shells out to `docker exec -it emerson-server emctl "$@"` — the real implementation lives inside the container image.
+The four verbs that cover most work:
 
-Current state (version, image, container status, loaded firmware) is set up by
-`install`/`load` and stored in `~/.emerson/config` (bash-sourceable), but don't
-read that file directly to check state — use `emerson info` instead:
+```
+emerson start ./flash.bin   # container (if needed) + a session on it, in one step
+emerson ctl ls              # talk to that session; 'emerson ctl <cmd>' for everything else
+emerson stop                # end the session, leave the container up
+emerson shutdown            # stop the container itself
+```
+
+There is no standalone `emctl` command — runtime control is `emerson ctl`, and
+the interactive REPL is `emerson cli`.
+
+**The host script and the container image must be version-matched.** The script
+drives the server with flags its own release understands, so a mismatched image
+fails at `emerson start` with an argument error out of the in-container
+`emctl` (`unrecognized arguments: --quiet`, say) followed by
+`Error: failed to start a session`. `emerson update` deliberately does *not*
+touch the image — pair it with `emerson image update <tarball>` (see below).
+`emerson info` prints both; check them against each other when `start` fails
+oddly.
+
+Current state (version, image, container status, loaded firmware, sessions) is
+stored in `~/.emerson/config` (bash-sourceable), but don't read that file
+directly to check state — use `emerson info` instead:
 
 ```
 $ emerson info
-Emerson version: 1.0.7
-Docker image: ghcr.io/tuliptreetech/emerson/stm32f030r8:1.0.7-local
+Emerson version: <version>
+Docker image: ghcr.io/tuliptreetech/emerson/<project>:<version>-local
+Peripherals file: /path/to/.emerson/peripherals.yaml
 Container (emerson-server): running
-Firmware loaded: /Users/tuliptree/flash.bin
-  Timestamp: Aug 13 16:38:51 2026
-  MD5 sum:   a3ad62cf62a71c24b580cef867e706cf
+Firmware loaded: /path/to/build/firmware.bin
+  Timestamp: Sep  3 00:03:24 2026
+  MD5 sum:   c20e8d1e7adacd54334e875924befbf1
+Recorded session: 39b199a9b723428db1473b4a74672c58
+Running sessions:
+  39b199a9b723428db1473b4a74672c58  <project>  *
 ```
 
-For the current *project* (not shown by `info`), use `emctl project` rather
-than grepping the config file. The config's `emerson_project` key was
-`emerson_model` in older installs — same slot, and it should match the
-project name test suites pass to `run_project`/`--project`, e.g. `stm32f030r8`.
+`Recorded session` is which session this install's commands default to;
+`Running sessions` is what the server actually has (only shown while the
+container is up, and `*` marks the recorded one). They can disagree — that is
+the point of showing both.
+
+For the current *project* (not shown by `info`), use `emerson ctl project` rather
+than grepping the config file. The config's `emerson_project` key should match
+the project name test suites pass to `run_project`/`--project`.
 
 ## Mental model / lifecycle
 
+Three nested things, each outliving the one inside it:
+
+1. **The Docker image** — the project, its device models, its `flash.bin`.
+   Installed once (`emerson install` / `emerson image update`).
+2. **The container** (`emerson-server`) — one per host, brought up on a
+   *specific firmware file* that is bind-mounted in. Ended by
+   `emerson shutdown`.
+3. **A session** — one running emulated machine, created from the mounted
+   firmware. Several can run at once in the same container. Ended by
+   `emerson stop`.
+
 ```
-emerson install            # one-time: PATH+symlinks, license, pull docker image
-emerson peripherals pull   # optional: pull .emerson/peripherals.yaml, trim to devices you care about
-emerson load ./flash.bin   # start the emerson-server container with a firmware image (mounts peripherals.yaml if present)
-emctl start                # start an emulator *session* for the configured project (paused at reset)
-emctl go / step / ...      # drive execution, inspect state
-emctl stop                 # end the session (container keeps running)
-emerson exec ...           # run a command inside the running container (bash, python3, etc.)
-emerson server keeps running until the container is stopped/removed
+emerson install             # one-time: PATH+symlinks, license, pull docker image
+emerson peripherals pull    # optional: pull .emerson/peripherals.yaml, trim to devices you care about
+emerson start ./flash.bin   # container (if not up) + a session on it, paused at reset
+emerson ctl go / step / ... # drive execution, inspect state
+emerson stop                # end the session; container stays up for the next 'start'
+emerson shutdown            # stop the container, ending every session in it
+emerson exec ...            # run a command inside the running container (bash, python3, etc.)
 ```
 
-A running Docker container (`emerson-server`) is a prerequisite for every `emctl` command except when the wrapper itself errors ("Emerson Server is not running... run 'emerson load'"). Within that server, a *project session* (`emctl start`) is a prerequisite for nearly all `emctl` subcommands except `project`, `set-project`, `shutdown`.
+The container/session split is a speed tradeoff: restarting a *session* takes
+about a second, restarting the *container* costs the image load and the
+server's whole startup (~8 s here). So prefer `emerson stop` + `emerson start`
+over `emerson shutdown` — but see the stale-bind-mount gotcha, which forces a
+full `shutdown` after most rebuilds.
+
+`emerson start` is idempotent and is meant to be the one command you re-run:
+
+- Container down → brings it up, then starts a session.
+- Container up, firmware unchanged → **reattaches** to the recorded session,
+  leaving it exactly as it was (a `running` machine keeps running; the tick
+  counter keeps advancing). Prints `Reusing session <token>.`
+- Container up, firmware *content* changed (md5 of the file differs from what
+  was recorded when the session started) → stops that session and starts a
+  fresh one on the new image. Prints
+  `Firmware changed since session <token> started; replacing that session.`
+- Firmware *path* differs from what the container has mounted → refuses, and
+  tells you to re-run with `--reload` or `emerson shutdown` first, because
+  changing it means recreating the container and killing every session in it.
+  Nothing is destroyed by the refusal.
+
+With no firmware argument, `emerson start` reuses whatever was loaded last, so
+the rebuild-and-rerun loop is *meant* to be a bare `emerson start`. In practice
+it isn't — a rebuild breaks the firmware bind mount and a bare `start` then
+destroys your session without replacing it. Use
+`emerson shutdown && emerson start` after a rebuild; see the first entry under
+Gotchas for why.
+
+A running container is a prerequisite for every `emerson ctl` command (the
+wrapper errors `Emerson Server is not running. Please start it with
+'emerson start'`). Within that container, a session is a prerequisite for
+nearly all of them — the exceptions are `project`, `peripherals`, and
+`--help`, which read static project config and work with the container alone.
 
 ## `emerson` — host lifecycle commands
 
 ```
-emerson install [--force-license-key] [--force-pull]   # set up PATH/symlinks, license, pull image
-emerson peripherals pull [path] [--force] [--catalog-only]  # pull the project's peripherals.yaml + I2C catalog from the image
-emerson peripherals clear                               # clear the stored peripherals.yaml override so 'load' falls back to the image default (doesn't delete the file)
-emerson load <firmware-file>                            # start emerson-server container w/ firmware (mounts .emerson/peripherals.yaml if present)
+# Running the emulator
+emerson start [firmware] [--new] [--project N] [--reload]  # container if needed + session; reattaches or replaces (see lifecycle above)
+emerson stop [session|--all]                            # end a session, leave the container up
+emerson shutdown                                        # stop the container, ending every session in it
+emerson sessions                                        # list running sessions, '*' marks the recorded one
+
+# Talking to a session
+emerson ctl <command> [args]                            # one-shot emulator command (see runtime section below)
+emerson cli                                             # interactive emulator REPL (needs a TTY)
+emerson serial [channel]                                # serial terminal on a broker channel; omit name to pick (needs a TTY)
 emerson exec [command [args]]                           # run a command in emerson-server (bash if omitted)
-emerson shutdown                                        # tell the running emerson-server to shut down (host-side wrapper around emctl shutdown)
-emerson update                                          # update the emerson/emctl scripts themselves
-emerson cleanup                                         # remove old downloaded emerson/emctl script versions from ~/.emerson/downloads (NOT docker images — see 'image cleanup')
-emerson image update <tarball>                          # docker load a tarball, restart server from it (was 'emerson update-image')
-emerson image cleanup                                   # remove old Docker images loaded by install/'image update' (this is what 'cleanup' used to do)
+
+# Installation and setup
+emerson install [--force-license-key] [--force-pull]   # set up PATH/symlinks, license, pull image
+emerson update                                          # update the emerson script itself
+emerson cleanup                                         # remove downloaded script versions nothing runs any more (NOT docker images — see 'image cleanup')
+emerson image update <tarball>                          # docker load a tarball, restart server from it
+emerson image cleanup                                   # remove old Docker images loaded by install/'image update'
 emerson license set [KEY]                               # store/overwrite license key (prompts if omitted)
 emerson license show                                    # show whether a key is stored (never prints it)
 emerson skills pull                                     # download the latest Emerson Claude Code skills into .claude/skills in the cwd, overwriting what's there
+
+# Peripherals
+emerson peripherals pull [path] [--force] [--catalog-only]  # pull the project's peripherals.yaml + I2C catalog from the image
+emerson peripherals clear                               # clear the stored peripherals.yaml override so 'start' falls back to the image default (doesn't delete the file)
+
+# Other
 emerson version                                         # print installed emerson version
-emerson info                                            # version, image, container status, loaded firmware
+emerson info                                            # version, image, container status, firmware, sessions
 emerson help
 ```
 
-**Renamed/reshuffled from older versions of this doc:** `emerson update-image` is
-now `emerson image update <tarball>`. `emerson cleanup` used to remove old
-Docker images — it now removes old downloaded `emerson`/`emctl` *script*
-versions from `~/.emerson/downloads`; the old cleanup-old-images behavior
-moved to the new `emerson image cleanup`. If you want to reclaim disk space
-from stale Docker images, use `image cleanup`, not `cleanup`.
+Global option: `--session TOKEN`, valid with `ctl`, `cli`, `serial`, and
+`sessions`.
+
+`cleanup` and `image cleanup` are different things: `cleanup` removes
+downloaded *script* versions from `~/.emerson/downloads`, `image cleanup`
+reclaims disk space from stale *Docker images*.
 
 `emerson exec` is the supported way to run something inside the `emerson-server`
 container (`emerson exec` alone opens an interactive bash shell; add a command
@@ -78,7 +164,54 @@ and args to run it directly, e.g. `emerson exec python3 -c "..."`; stdin is
 forwarded, so `emerson exec python3 -` works for piping in a script). Prefer it
 over raw `docker exec ... emerson-server ...`.
 
-Every command except `install`/`update`/`image`/`cleanup`/`version`/`info`/`help` checks for a newer release and nags to run `emerson update` if one exists.
+Only `start`, `shutdown`, `license`, and `skills` check for a newer
+release, and at most once a day (stamped in `~/.emerson/last_update_check`,
+overridable with `$EMERSON_UPDATE_CHECK_INTERVAL`). Notably `emerson ctl` does
+**not** — it's the inner loop of a debugging session, so it makes no network
+round trip.
+
+## Sessions
+
+A session is one running emulated machine. The server can run several at once,
+including several of the same project, so every command that acts on one has
+to know which. `emerson start` records the token it created, and the rest
+default to it.
+
+```bash
+emerson start                 # records a session; prints "Session:   <token>"
+emerson start --new           # an *additional* session, leaving the first alone
+emerson sessions              # list them; '*' is the recorded one
+emerson ctl --session <tok> state
+emerson stop <tok>            # end one; --all for every one
+```
+
+Which session a command acts on, in order:
+
+1. `--session TOKEN` on the command line
+2. `$EMERSON_SESSION` — a per-shell override, which is how you drive two
+   sessions from two terminals without them fighting over one config file
+3. the recorded session in `~/.emerson/config`
+4. the only session of this install's project, if there's exactly one — it
+   gets adopted and recorded, so the next command doesn't have to work it out
+
+With more than one session running and nothing recorded, commands fail with
+`Error: more than one session is running - say which one with --session
+<token>` and list the candidates, rather than guessing. Adoption is scoped to
+this install's project, so a session belonging to another project in the same
+image is never silently adopted.
+
+Verified behavior: two sessions on the same project are genuinely independent —
+`emerson ctl --session A go` left A `running` with an advancing tick counter
+while B stayed `paused` at `0x0`. `emerson stop <other-token>` stops that
+session without clearing the recorded one; `emerson stop` on the recorded
+session clears it.
+
+**Lifecycle verbs are blocked on the `ctl` passthrough.** `emerson ctl start`,
+`ctl stop`, `ctl shutdown`, `ctl sessions`, and `ctl set-project` all refuse
+with a message naming the `emerson`-level equivalent to use instead. That's
+deliberate: `emerson ctl` injects the recorded token, so `emerson ctl stop`
+would stop the recorded session while leaving it recorded as current. Use
+`emerson start` / `stop` / `shutdown` / `sessions` / `start --project <name>`.
 
 ## I2C peripherals (`.emerson/peripherals.yaml`)
 
@@ -110,83 +243,94 @@ Each entry needs `name`, `address` (hex), and either `native: <kind>` (one of
 the catalog kinds for that controller) or `path: <python-file>` for a custom
 target. **To scope the emulated bus down to only the devices you care about,
 edit this file directly** — delete the entries you don't need, keep/add the
-ones you do. `emerson load` automatically mounts `.emerson/peripherals.yaml`
+ones you do. `emerson start` automatically mounts `.emerson/peripherals.yaml`
 into the container when it's present in the cwd, so edits take effect on the
-next `emerson load` (+ `emctl start`); no need to re-pull or rebuild anything.
+next `emerson start`; no need to re-pull or rebuild anything. (Unlike the
+firmware, `peripherals.yaml` is edited in place, so its bind mount survives —
+but the container still only re-reads it when a session is created.)
 
 `peripherals pull` takes an optional `[path]` (a directory gets
 `peripherals.yaml` appended); either way it also points Emerson's stored
-peripherals reference at that file for `emerson load` to pick up. To go back
+peripherals reference at that file for `emerson start` to pick up. To go back
 to the image's default peripherals instead of your override, run
 `emerson peripherals clear` — it clears the stored reference but does not
 delete the override file itself.
 
 To inspect the catalog/current peripherals from inside a running container
-without needing a started project *session*, use `emctl peripherals` — see
+without needing a started project *session*, use `emerson ctl peripherals` — see
 the runtime section below.
 
-## `emctl` — runtime control commands
+## `emerson ctl` — runtime control commands
 
-Full built-in reference: `emctl --help` (only works while `emerson-server` is running; see Non-interactive note below). Global options: `--host HOST` (default `http://localhost:10314`), `--project NAME` (else `$EMERSON_PROJECT`, else `~/.emerson/config`).
+`emerson ctl <command>` runs one emulator command against a session and exits.
+It's a passthrough to the `emctl` binary *inside* the container, with
+`--host` and `--session` injected for you (both still win if you pass them
+yourself).
+
+Full built-in reference: `emerson ctl --help` (works with the container up, no
+session needed). Global options: `--host HOST` (default
+`http://localhost:10314`), `--project NAME` (else `$EMERSON_PROJECT`, else
+`~/.emerson/config`), `--session TOKEN`.
 
 **Config**
-- `emctl project` — print current default project
-- `emctl set-project [name]` — set default project (interactive picker if omitted)
-- `emctl peripherals` — print the I2C peripheral catalog and the project's current `peripherals.yaml`; reads static config, so no `emctl start` session is needed (just the container running)
+- `emerson ctl project` — print current default project (no session needed)
+- To change the default project, use `emerson start --project <name>` — `ctl set-project` is blocked (see Sessions)
+- `emerson ctl peripherals` — print the I2C peripheral catalog and the project's current `peripherals.yaml`; reads static config, so no session is needed (just the container running)
 
-**Session/server management**
-- `emctl start` — start a new session for the project (only command, besides `stop`/`shutdown`, that works with no session yet)
-- `emctl stop` — stop the session
-- `emctl shutdown` — shut down the emulator server entirely
+**Session/server management** — not available via `ctl`; use the `emerson`-level verbs
+- `emerson start` / `emerson start --new` — create a session
+- `emerson stop [token|--all]` — end a session, container stays up
+- `emerson shutdown` — stop the container, ending every session
+- `emerson sessions` — list them
 
 **Execution control**
-- `emctl go [counter]` — resume; optional hex tick count to run until
-- `emctl pause`
-- `emctl step [n]` — step n instructions (decimal or `0x` hex), default 1.
+- `emerson ctl go [counter]` — resume; optional hex tick count to run until
+- `emerson ctl pause`
+- `emerson ctl step [n]` — step n instructions (decimal or `0x` hex), default 1.
   **Returns before the step finishes** — see the gotcha below before reading
   state afterwards.
-- `emctl reset` — reset to initial state
+- `emerson ctl reset` — reset to initial state
 
 **Status**
-- `emctl state` — prints `running`, `paused`, or `halted on error`. All lowercase, and the last one is spaced, not camel-cased — match it exactly if a script compares against it.
-- `emctl ticks` — current tick counter (hex)
+- `emerson ctl state` — prints `running`, `paused`, or `halted on error`. All lowercase, and the last one is spaced, not camel-cased — match it exactly if a script compares against it.
+- `emerson ctl ticks` — current tick counter (hex)
 
 **Device tree** (paths are absolute, e.g. `/PXA270`, `/PXA270/core0`, `/system/uart0`)
-- `emctl ls [path]` — list children (default `/`)
-- `emctl find [path]` — device tree as JSON
-- `emctl dump` — all devices + common register values
-- `emctl connections` — list inter-device port/pin/net wiring, e.g. `gpioc.pin0.in -> /MEM/i2c1/charger.int` or an IRQ line into the NVIC. Peripheral-pin wiring is declared per-device in `.emerson/peripherals.yaml` under a `pins:` map (e.g. `pins: { int: { device: "/MEM/gpioc", pin: 0 } }`) and shows up here once configured. **A connection listed here is not proof the device model actually drives that pin** — on this board (Emerson 1.0.11), `charger.int`/`fuel_gauge.alrt` are wired to `gpioc.pin0`/`pin2` per this command, but triggering the condition (`inject_fault`, `set_soc` past the alert threshold) never moved the target GPIO's `IDR`, confirmed by a breakpoint on the firmware's fault-handling code never firing early (tracked as [emerson-issues#17](https://github.com/tuliptreetech/emerson-issues/issues/17)). Verify pin-level effects by reading the destination GPIO's `IDR` after triggering the condition, not just by checking `connections` output.
+- `emerson ctl ls [path]` — list children (default `/`)
+- `emerson ctl find [path]` — device tree as JSON
+- `emerson ctl dump` — all devices + common register values
+- `emerson ctl connections` — list inter-device port/pin/net wiring, e.g. a peripheral's `int`/`alrt`-style pin wired to a GPIO input (`gpioc.pin0.in -> /MEM/i2c1/<device>.int`) or an IRQ line into the NVIC. Peripheral-pin wiring is declared per-device in `.emerson/peripherals.yaml` under a `pins:` map (e.g. `pins: { int: { device: "/MEM/gpioc", pin: 0 } }`) and shows up here once configured. **A connection listed here documents intended wiring, not proof the device model drives that pin at runtime** — a peripheral's fault/alert condition (`inject_fault`, `set_soc` past the alert threshold) can leave the target GPIO's `IDR` untouched, i.e. the pin wired per `connections` but never actually toggled. Don't take `connections` output alone as proof of a working pin-level effect: verify by reading the destination GPIO's `IDR` after triggering the condition, and ideally also confirm the firmware's own interrupt callback actually runs (see below).
 
 **Snapshots**
-- `emctl snap` / `emctl snap save [name]` / `emctl snap load <name>` (name = timestamp if omitted; no `.snap` extension in `load`)
+- `emerson ctl snap` / `emerson ctl snap save [name]` / `emerson ctl snap load <name>` (name = timestamp if omitted; no `.snap` extension in `load`)
 
 **Checkpointing** (required for reverse stepping)
-- `emctl checkpoint` / `emctl checkpoint enable` / `emctl checkpoint disable`
+- `emerson ctl checkpoint` / `emerson ctl checkpoint enable` / `emerson ctl checkpoint disable`
 
 **Data brokers** (named async I/O channels, e.g. UART TTYs, external displays)
-- `emctl broker` — list channel names
-- `emctl broker <name>` — read available bytes (raw to stdout; `--limit N`)
-- `emctl broker <name> <data>` — write a UTF-8 string
+- `emerson ctl broker` — list channel names
+- `emerson ctl broker <name>` — read available bytes (raw to stdout; `--limit N`)
+- `emerson ctl broker <name> <data>` — write a UTF-8 string
 
 **Logs**
-- `emctl logs` / `emctl logs -f` (stream) / `emctl logs --level warn` (debug<info<warn<error)
+- `emerson ctl logs` / `emerson ctl logs -f` (stream) / `emerson ctl logs --level warn` (debug<info<warn<error)
 
 **OS awareness** (needs project's `os_handler` configured)
-- `emctl os ps` / `os set <pid>` / `os unset` / `os maps [pid]` / `os modules` / `os regs [pid]` / `os scan`
+- `emerson ctl os ps` / `os set <pid>` / `os unset` / `os maps [pid]` / `os modules` / `os regs [pid]` / `os scan`
 
 **Per-device** (require `<path>`)
-- `emctl r <path> [reg]` — print registers, or one; `emctl r <path> <reg> <val>` to set (val can be a number or another register name). **Prefer this over `read-mem`/`write-mem` for named peripheral registers** (GPIO MODER/PUPDR/IDR/ODR, timers, etc.) — `emctl r <path>` with no reg lists every named register on that device, so there's no need to hand-compute byte offsets the way `read-mem`/`write-mem` require. Reserve `read-mem`/`write-mem` for genuinely address-based memory (SRAM/flash contents, GDDRAM-style framebuffers) that has no named-register abstraction.
-- `emctl registers <path>` — all registers
-- `emctl pc <path>` / `emctl ic <path>` — program/instruction counter (CPU only)
-- `emctl details <path>` — kind, memory, registers
-- `emctl u <path>` / `emctl ui <path>` — disassemble next 10 instrs at PC (`ui` adds p-code)
-- `emctl read-mem <path> <addr> <len> [-w N] [-o FILE]` — hex dump or raw write to FILE; `-w` groups into N-byte little-endian words. **`<addr>` is relative to `<path>`'s own base, not an absolute system address** — e.g. `emctl read-mem /MEM/sram 0x484 4` (offset into that 0x2000-byte device), not `0x20000484`; the latter errors "out of range" against the device's own (small) size. The one path where relative-to-base and absolute happen to coincide is the CPU (`/Cortex-M0` or similar) — its address space starts at 0 and covers the whole system, so full linked addresses (from an ELF's symbol table, vector table, etc.) can be passed straight through: `emctl read-mem /Cortex-M0 0x20000490 4`.
-- `emctl write-mem <path> <addr> (<hex>|--file FILE|--string STR)` — same relative-to-`<path>` addressing as `read-mem`. **Memory devices only** (RAM/ROM/flash) — it writes fixed-width words sized to whatever device sits at `<addr>`, which isn't a real MMIO access path; a payload that overruns the target keeps writing into whatever's mapped next. For hardware registers, use `emctl r <path> <reg> <val>` instead.
-- `emctl db <path> <addr> [count]` — read-only alternate to `read-mem` via the raw command language; hex/decimal `<addr>`, defaults to 16 bytes, always prints a hex dump (no `-w`/`-o`). Prefer `read-mem` when you want word-grouping or file output.
-- `emctl write <path> <addr> <hex>` — raw-command-language alternate to `write-mem`; `<addr>` may also be a register+offset (e.g. `r1+4`, `r1-4`), but only takes a positional hex string (no `--file`/`--string`). Same memory-device-only caveat as `write-mem`.
+- `emerson ctl r <path> [reg]` — print registers, or one; `emerson ctl r <path> <reg> <val>` to set (val can be a number or another register name). **Prefer this over `read-mem`/`write-mem` for named peripheral registers** (GPIO MODER/PUPDR/IDR/ODR, timers, etc.) — `emerson ctl r <path>` with no reg lists every named register on that device, so there's no need to hand-compute byte offsets the way `read-mem`/`write-mem` require. Reserve `read-mem`/`write-mem` for genuinely address-based memory (SRAM/flash contents, GDDRAM-style framebuffers) that has no named-register abstraction.
+- `emerson ctl registers <path>` — all registers
+- `emerson ctl pc <path>` / `emerson ctl ic <path>` — program/instruction counter (CPU only)
+- `emerson ctl details <path>` — kind, memory, registers
+- `emerson ctl u <path>` / `emerson ctl ui <path>` — disassemble next 10 instrs at PC (`ui` adds p-code)
+- `emerson ctl read-mem <path> <addr> <len> [-w N] [-o FILE]` — hex dump or raw write to FILE; `-w` groups into N-byte little-endian words. **`<addr>` is relative to `<path>`'s own base, not an absolute system address** — e.g. `emerson ctl read-mem /MEM/sram 0x484 4` (offset into that 0x2000-byte device), not `0x20000484`; the latter errors "out of range" against the device's own (small) size. The one path where relative-to-base and absolute happen to coincide is the CPU (`/Cortex-M0` or similar) — its address space starts at 0 and covers the whole system, so full linked addresses (from an ELF's symbol table, vector table, etc.) can be passed straight through: `emerson ctl read-mem /Cortex-M0 0x20000490 4`.
+- `emerson ctl write-mem <path> <addr> (<hex>|--file FILE|--string STR)` — same relative-to-`<path>` addressing as `read-mem`. **Memory devices only** (RAM/ROM/flash) — it writes fixed-width words sized to whatever device sits at `<addr>`, which isn't a real MMIO access path; a payload that overruns the target keeps writing into whatever's mapped next. For hardware registers, use `emerson ctl r <path> <reg> <val>` instead.
+- `emerson ctl db <path> <addr> [count]` — read-only alternate to `read-mem` via the raw command language; hex/decimal `<addr>`, defaults to 16 bytes, always prints a hex dump (no `-w`/`-o`). Prefer `read-mem` when you want word-grouping or file output.
+- `emerson ctl write <path> <addr> <hex>` — raw-command-language alternate to `write-mem`; `<addr>` may also be a register+offset (e.g. `r1+4`, `r1-4`), but only takes a positional hex string (no `--file`/`--string`). Same memory-device-only caveat as `write-mem`.
 
 **Debugpoints — machine-wide view**
-- `emctl debugpoints [path]` — walks the whole device tree and lists every breakpoint, watchpoint, and stoppoint set anywhere (kind, target, enabled/disabled, hit count, access mode), optionally filtered to devices whose path starts with `<path>`. Devices with none set, or that don't support them, are omitted. Use this to get an overview across devices instead of checking `bp`/`wp`/`sp` one path at a time.
+- `emerson ctl debugpoints [path]` — walks the whole device tree and lists every breakpoint, watchpoint, and stoppoint set anywhere (kind, target, enabled/disabled, hit count, access mode), optionally filtered to devices whose path starts with `<path>`. Devices with none set, or that don't support them, are omitted. Use this to get an overview across devices instead of checking `bp`/`wp`/`sp` one path at a time.
 
 **Breakpoints / watchpoints / stoppoints** (require `<path>`) — see the dedicated
 section below for semantics, id scoping, and a real deletion bug to watch for.
@@ -195,38 +339,67 @@ section below for semantics, id scoping, and a real deletion bug to watch for.
 - `sp <path> [read|write <reg|addr>|fetch <addr>]` — stoppoint; halts *after* the access completes. `spd <path> <id>`.
 
 **Custom device actions** (board/peripheral models expose their own verbs)
-- `emctl actions <path>` — list verbs + usage
-- `emctl action <path> <verb> [args...]` — invoke one (args joined w/ spaces, parsed by the device)
+- `emerson ctl actions <path>` — list verbs + usage
+- `emerson ctl action <path> <verb> [args...]` — invoke one (args joined w/ spaces, parsed by the device)
 
 ## Non-interactive / scripted / agent use
 
-The only `emctl` subcommand that reads stdin is a bare `set-project` with no name arg (it prompts with a numbered picker via Python's `input()`). Everything else is one-shot and non-interactive by design (per its own `--help`: "designed for scripting, automation, and LLM agent use"), so ordinary commands (`emctl state`, `emctl ls`, `emctl set-project <name>`, etc.) run fine with no TTY — just call `emctl <args...>` directly, including from agents/CI. `emctl set-project` with no name needs a real terminal, since there's no other way to answer the prompt.
+`emerson ctl` is one-shot and non-interactive by design (per its own `--help`:
+"designed for scripting, automation, and LLM agent use"), so every command runs
+fine with no TTY — call `emerson ctl <args...>` directly from agents/CI.
+
+It always passes `-i` to `docker exec`, so piped stdin (a heredoc, `< payload.hex`)
+reaches the container, and only adds `-t` when both ends really are terminals.
+That matters for byte-exact output: `emerson ctl broker tty0 > capture.bin`
+stays uncorrupted precisely because no pseudo-TTY is allocated to translate
+newlines. When you *do* have a terminal, the `-t` is what forwards Ctrl+C to a
+streaming command (`emerson ctl logs -f`) instead of leaving it running inside
+the container.
+
+`emerson cli` and `emerson serial` are the two exceptions — both are terminal
+programs (a REPL and a raw-mode serial console) and refuse outright without a
+TTY:
+
+```
+Error: 'emerson cli' needs an interactive terminal.
+  For scripted use, run one-shot commands with 'emerson ctl' instead.
+```
+
+So an agent should never reach for `emerson cli`/`emerson serial`; read a
+serial channel with `emerson ctl broker <name>` instead.
 
 ## Typical session, end to end
 
 ```bash
-emerson load ./flash.bin       # start container (needs valid license)
-emctl start                    # begin a paused session for the configured project
-emctl state                    # -> paused
-emctl ls                       # top-level device tree, e.g.: M0Cpu  MEM
-emctl find                     # full tree as path/kind pairs, with offsets for addressed devices
-emctl pc /M0Cpu
-emctl bp /M0Cpu 0x08001234
-emctl go
-emctl logs -f                  # Ctrl+C to stop streaming
-emctl stop
+emerson start ./flash.bin       # container (needs valid license) + a paused session
+emerson ctl state               # -> paused
+emerson ctl ls                  # top-level device tree, e.g.: Cortex-M0  MEM
+emerson ctl find                # full tree as path/kind pairs, with offsets for addressed devices
+emerson ctl pc /Cortex-M0
+emerson ctl bp /Cortex-M0 0x08001234
+emerson ctl go
+emerson ctl logs -f             # Ctrl+C to stop streaming
+emerson stop                    # end the session, container stays up
+```
+
+Then the edit-build-run loop. Because a rebuild usually breaks the bind mount
+(see Gotchas), it is a full container cycle, not just a session one:
+
+```bash
+make                            # or ./docker-build.sh
+emerson shutdown && emerson start   # NOT a bare 'emerson start' — see the gotcha
 ```
 
 ## Breakpoints, watchpoints, and stoppoints — which to use
 
-All three require a device tree `<path>` (`emctl ls`/`find` to locate one). What
+All three require a device tree `<path>` (`emerson ctl ls`/`find` to locate one). What
 they have in common: creating one prints `id=N`; listing (`bp`/`wp`/`sp` with no
 further args) shows `id=N [Type] {...} (access) [REG] enabled hit=N`; `hit=`
 only increments on a genuine access made *by the emulated CPU/bus* — see the
 gotcha below, host-side pokes don't count. IDs are scoped **per device path**,
 and `wp`/`sp` share one counter on a given path (e.g. on `/MEM/crc`, a `wp`
 then an `sp` then another `wp` came back `id=0`, `id=1`, `id=2`); a different
-device path starts its own counter at 0. Confirmed on Emerson 1.0.10.
+device path starts its own counter at 0.
 
 Pick by what you're trying to catch:
 
@@ -249,24 +422,23 @@ Pick by what you're trying to catch:
   read the *new* value, not the pre-access one. Good for catching the first
   unexpected write to a region, or the exact moment a peripheral register
   changes during a fault-injection run (see custom device actions above,
-  e.g. bq25892's `inject_fault`).
+  e.g. a peripheral's own `inject_fault`-style verb).
 
-Confirmed by testing on this project's session (`stm32f030r8`, Emerson
-1.0.10):
+Confirmed by testing:
 
-- A CPU-register watchpoint (`emctl wp /Cortex-M0 read r0`) accumulated real
+- A CPU-register watchpoint (`emerson ctl wp /Cortex-M0 read r0`) accumulated real
   hits just from normal execution (`hit=5` within a second, since r0 is
   touched on nearly every call/return) — watchpoints do track genuine guest
   activity, not just theoretically.
 - **Host-initiated register writes don't trigger wp/sp.** Arming
   `sp /MEM/crc write POL` and then writing that same register from the host
-  via `emctl r /MEM/crc POL 0x7` left `hit=0` and the machine `running` —
+  via `emerson ctl r /MEM/crc POL 0x7` left `hit=0` and the machine `running` —
   the stoppoint only fires on an access driven by the emulated CPU/bus, not
-  on a debug-interface poke from `emctl r`/`write-mem`. Don't use `emctl r`
+  on a debug-interface poke from `emerson ctl r`/`write-mem`. Don't use `emerson ctl r`
   to "test" that a stoppoint is wired up; you have to make the firmware do
   the access.
 - **`sp` on a CPU device genuinely halts the machine** — arming
-  `sp /Cortex-M0 read r0` then `emctl go` came back `paused` almost
+  `sp /Cortex-M0 read r0` then `emerson ctl go` came back `paused` almost
   immediately (r0 is touched on nearly every call/return), confirming a
   stoppoint really stops execution rather than just logging. But **it can
   overshoot**: the `hit=` counter read right after the halt was `3` one run
@@ -287,31 +459,87 @@ Confirmed by testing on this project's session (`stm32f030r8`, Emerson
   `this device does not have debug points` — even though the id clearly
   exists in the `wp`/`sp` listing. The identical operation against a
   `/Cortex-M0`-scoped watchpoint (by id) deleted cleanly. No workaround was
-  found short of ending the session (`emctl stop` + `emctl start`); a stray
+  found short of ending the session (`emerson stop` + `emerson start`); a stray
   peripheral watch/stoppoint is otherwise harmless to leave in place (`wp`
   never halts, and an un-hit `sp` never halts either), but budget for not
   being able to remove it mid-session.
 
 ## Gotchas
 
-- Almost every `emctl` command needs both: (1) `emerson-server` container running (`emerson load`), and (2) a project session started (`emctl start`). The error messages name exactly which precondition is missing — read them, don't guess.
-- `emerson load` requires a valid stored license (`emerson license show`/`emerson license set`).
-- `action` vs top-level commands: an unrecognized top-level verb is a hard error, never silently treated as a device action — you must type `emctl action <path> <verb>` explicitly. Use `emctl actions <path>` first to see what a device supports.
-- `snap load <name>` takes the snapshot name *without* the `.snap` extension.
-- `sp` (stoppoint) halts the emulator *after* the access completes, unlike a breakpoint which halts before executing.
-- **`emctl step` returns before the step has finished.** It dispatches the command and exits while the emulator is still executing, so anything you read immediately afterwards may be sampled mid-step. Poll `emctl state` until it reports `paused` before inspecting:
+- **A rebuild usually breaks the firmware bind mount, and a bare `emerson start`
+  then destroys your session without replacing it.** This is the most expensive
+  gotcha here, and it hits the exact loop `start` was designed for.
 
-  ```bash
-  emctl step 2000000
-  until [ "$(emctl state)" = "paused" ]; do sleep 1; done
-  emctl ticks   # only now is this a settled value
+  The firmware reaches the container as a **single-file bind mount**, which
+  Docker pins to the file's *inode*, fixed when the container is created.
+  `arm-none-eabi-objcopy` (and most build tools) writes the output by creating
+  a **new** file rather than rewriting the old one in place, so after `make`
+  the container's mount points at a deleted inode:
+
+  ```
+  $ docker exec emerson-server ls /opt/tuliptree/emerson/projects/<proj>/flash.bin
+  ls: cannot access '...': No such file or directory
   ```
 
-  Small steps hide this: they finish faster than the next `docker exec` round trip (~250 ms), so `emctl step 100` looks perfectly synchronous. Scale up and it stops being. Measured on `stm32f030r8` 1.0.7 — after `emctl step 2000000` the call returned in 284 ms, `emctl state` reported `running`, and three successive `emctl ticks` gave `0x407a5`, `0x62e6d`, `0x8032d`. After polling to `paused`, three reads all gave `0x3d3075`.
+  `emerson start` doesn't check for this. It notices the md5 changed, **stops
+  the working session first**, then fails to create the replacement:
+
+  ```
+  Firmware changed since session <token> started; replacing that session.
+  RuntimeError: ... "internal machine error: couldn't read file
+    \"/opt/tuliptree/emerson/projects/<proj>/flash.bin\": No such file or directory"
+  Error: failed to start a session for project <proj>.
+  ```
+
+  You are left with no session at all, and `emerson sessions` reports none.
+
+  **`--reload` does not fix it**, despite sounding like it should: the reload
+  branch is only reached when the firmware *path* differs from what's mounted.
+  Here the path is identical — only the inode changed — so `--reload` is
+  ignored and the container is left with its dead mount.
+
+  **The fix is `emerson shutdown` first**, which recreates the container and
+  therefore the mount:
+
+  ```bash
+  make && emerson shutdown && emerson start
+  ```
+
+  Make that the reflex after any rebuild. It costs the container startup (~8 s
+  here), which is the thing the session/container split was meant to save — but
+  a bare `emerson start` costs you the session *and* still doesn't work.
+
+  Confirmed by inode: an in-place write that preserves the inode
+  (`dd conv=notrunc`, or `cp` over the existing file) *does* propagate straight
+  through the live mount to the container, while a rebuild that replaces the
+  file does not. So a build that writes its output in place would be immune;
+  the standard objcopy-based one isn't.
+
+- **The host script and the container image must be version-matched.** The
+  script drives the server with flags its own release understands, so a
+  mismatched image makes `emerson start` die with an argument error out of the
+  in-container `emctl` (`unrecognized arguments: --quiet`, say) followed by
+  `Error: failed to start a session`. `emerson update` updates only the script,
+  so pair it with `emerson image update <tarball>`. `emerson info` shows both
+  versions — check them against each other when `start` fails oddly.
+- Almost every `emerson ctl` command needs both: (1) the `emerson-server` container running, and (2) a session started — both of which `emerson start` gives you. The error messages name exactly which precondition is missing — read them, don't guess. The exceptions that need no session are `ctl project`, `ctl peripherals`, and `ctl --help`.
+- `emerson start` requires a valid stored license (`emerson license show`/`emerson license set`).
+- `action` vs top-level commands: an unrecognized top-level verb is a hard error, never silently treated as a device action — you must type `emerson ctl action <path> <verb>` explicitly. Use `emerson ctl actions <path>` first to see what a device supports.
+- `snap load <name>` takes the snapshot name *without* the `.snap` extension.
+- `sp` (stoppoint) halts the emulator *after* the access completes, unlike a breakpoint which halts before executing.
+- **`emerson ctl step` returns before the step has finished.** It dispatches the command and exits while the emulator is still executing, so anything you read immediately afterwards may be sampled mid-step. Poll `emerson ctl state` until it reports `paused` before inspecting:
+
+  ```bash
+  emerson ctl step 2000000
+  until [ "$(emerson ctl state)" = "paused" ]; do sleep 1; done
+  emerson ctl ticks   # only now is this a settled value
+  ```
+
+  Small steps hide this: they finish faster than the next `docker exec` round trip (~250 ms), so `emerson ctl step 100` looks perfectly synchronous. Scale up and it stops being. Measured: after `emerson ctl step 2000000` the call returned in 284 ms, `emerson ctl state` reported `running`, and three successive `emerson ctl ticks` gave `0x407a5`, `0x62e6d`, `0x8032d`. After polling to `paused`, three reads all gave `0x3d3075`.
 
   This bites hardest when you read **two or more** locations per step and compare them: each read lands at a different point in emulated time, so a correlation between two counters can be destroyed (or manufactured) by the sampling alone. Tracked as [emerson-issues#11](https://github.com/tuliptreetech/emerson-issues/issues/11).
-- `emerson update` only refreshes the `emerson`/`emctl` host scripts, not the running Docker image — use `emerson image update <tarball>` for that.
-- **GPIO register writes that change pin drive are rejected outright**, via either `write-mem` or `emctl r <path> <reg> <val>` — e.g. clearing `PUPDR` bits to fake a broken pull-up/corroded connector fails with `Error while writing to device gpiob: a write here changes what the pins drive onto the external circuit`. This is a deliberate guardrail (the emulator models the electrical consequence of the write), not a bug, and it isn't bypassed by using one command over the other. There's no supported way to fault-inject at the raw GPIO/bus-electrical level for this board; use a peripheral's own `emctl actions <path>` fault-injection verbs instead (e.g. bq25892's `inject_fault ntc_hot/ntc_cold/...`) to simulate a damaged/glitching sensor.
+- `emerson update` only refreshes the `emerson` host script, not the running Docker image — use `emerson image update <tarball>` for that. See the version-matching gotcha above: updating one without the other breaks `emerson start`.
+- **GPIO register writes that change pin drive are rejected outright**, via either `write-mem` or `emerson ctl r <path> <reg> <val>` — e.g. clearing `PUPDR` bits to fake a broken pull-up/corroded connector fails with `Error while writing to device gpiob: a write here changes what the pins drive onto the external circuit`. This is a deliberate guardrail (the emulator models the electrical consequence of the write), not a bug, and it isn't bypassed by using one command over the other. There's no supported way to fault-inject at the raw GPIO/bus-electrical level; use a peripheral's own `emerson ctl actions <path>` fault-injection verbs instead (e.g. `inject_fault <condition>`) to simulate a damaged/glitching sensor.
 
 ## Debugging firmware state without instrumentation
 
@@ -324,8 +552,12 @@ trying to diagnose.
 General recipe for "is this C global/struct field what I expect it to be right
 now":
 
-1. **Find the address.** Symbols aren't loaded into `emctl` — get them from the
-   ELF instead: `arm-none-eabi-nm build/firmware.elf | grep -i <symbol>`. For a
+1. **Find the address.** Symbols aren't loaded into the emulator — get them from the
+   ELF instead: `arm-none-eabi-nm build/firmware.elf | grep -i <symbol>`. If
+   that binary isn't installed on the host, check whether the project's own
+   build toolchain already has it (e.g. a Docker-based build container) before
+   installing a separate copy — `docker compose run --rm <build-service>
+   arm-none-eabi-nm ...` works exactly the same way. For a
    struct field (e.g. `hi2c1.ErrorCode`), `nm` only gives you the struct's base
    address; add the field's byte offset by hand from the struct's typedef
    (count each member's size, respecting natural alignment — e.g. on a Cortex-M0
@@ -338,9 +570,9 @@ now":
    `nm` for the base symbol after every rebuild rather than assuming it's
    stable — don't just reuse offsets computed against a stale build.
 2. **Set a breakpoint past the code you care about**, e.g. at the entry of the
-   next function called after it (`emctl bp /Cortex-M0 <addr>`), then
-   `emctl go` and wait for `emctl state` to report `paused`.
-3. **Read the value** with `emctl read-mem /Cortex-M0 <addr> <len>` (see the
+   next function called after it (`emerson ctl bp /Cortex-M0 <addr>`), then
+   `emerson ctl go` and wait for `emerson ctl state` to report `paused`.
+3. **Read the value** with `emerson ctl read-mem /Cortex-M0 <addr> <len>` (see the
    `read-mem` addressing note above — use the CPU device path so linked/ELF
    addresses work unmodified). Sanity-check the technique on a known-good
    value first if the result looks surprising (e.g. read a handle's
@@ -349,7 +581,7 @@ now":
    you don't have an independent way to verify.
 
 Worked example: an I2C driver was silently failing (no errors surfaced, but
-nothing appeared on a simulated OLED). Rather than adding `printf` calls,
+nothing appeared on a simulated display). Rather than adding `printf` calls,
 `arm-none-eabi-nm` found `hi2c1`/`hi2c2` (`I2C_HandleTypeDef` handles), a
 breakpoint was set just after the failing calls, and `read-mem` on each
 handle's `ErrorCode` field (offset 76 into the struct: `Instance` (4) +
@@ -360,9 +592,38 @@ handle's `ErrorCode` field (offset 76 into the struct: `Instance` (4) +
 electrical cause (missing GPIO pull-ups on the I2C pins) instead of a
 protocol/logic bug, without touching the firmware at all.
 
-## Scripting beyond `emctl`
+### Verifying a peripheral-driven interrupt actually reaches firmware
 
-For control flow (polling loops, conditionals) or capabilities `emctl` doesn't
+A peripheral model asserting a fault/alert pin doesn't by itself prove the
+interrupt fires in firmware — the pin has to toggle the right GPIO bit *and*
+that has to propagate through EXTI/NVIC *and* the firmware's own callback has
+to run with the right pin argument. Check all three layers rather than
+inferring the last two from the first:
+
+1. **Pin level.** `emerson ctl connections` to find which GPIO pin the peripheral's
+   pin is wired to, then `emerson ctl r <gpio-path> IDR` for a baseline. Trigger the
+   condition via the peripheral's own `emerson ctl action <path> <verb>` (e.g. an
+   `inject_fault`/`set_soc`-style verb), then re-read `IDR` — an active-low
+   pin should flip from 1 to 0.
+2. **Firmware level.** Find the firmware's interrupt callback symbol with
+   `arm-none-eabi-nm` (e.g. `HAL_GPIO_EXTI_Callback` on STM32 HAL-based
+   firmware), set a CPU breakpoint on it (`emerson ctl bp /Cortex-M0 <addr>`), `go`,
+   and trigger the condition. Hitting the breakpoint confirms the interrupt
+   actually reached the ISR; `emerson ctl pc` should match the breakpoint address,
+   and the callback's own arguments (in `r0`, `r1`, ... per AAPCS on Cortex-M0)
+   confirm *which* pin/line it thinks fired — cross-check that against the
+   pin bit you saw flip in step 1, rather than assuming they're the same one.
+3. **Timing context.** If the goal is explaining a slow-feeling update (e.g.
+   "the display took a while to reflect a fault"), sample `emerson ctl ticks`
+   across a wall-clock `sleep` to get the emulator's actual simulated
+   cycles-per-second. Comparing that to the core's real clock speed
+   quantifies how many real seconds a full polling interval costs in the
+   emulator — useful for judging whether an interrupt-driven fast path (vs.
+   waiting for the next poll) is worth the firmware complexity.
+
+## Scripting beyond `emerson ctl`
+
+For control flow (polling loops, conditionals) or capabilities `emerson ctl` doesn't
 expose (checkpoint step-back, blocking waits on debugger/serial events, etc.),
 the emulator also has a Python binding installed inside the `emerson-server`
 container — see the [emerson-python skill](../emerson-python/SKILL.md).
