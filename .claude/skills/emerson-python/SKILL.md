@@ -1,25 +1,25 @@
 ---
 name: Emerson Python Library
-description: Script the Emerson emulator directly via its Python bindings (the `emerson` module installed inside the `emerson-server` container) instead of shelling out to individual `emctl` commands. Use when the user wants a Python script or REPL against Emerson, mentions `import emerson`, `EmulatorController`, `Connection`, `Machine`, `Device`, or needs control flow (polling loops, conditionals, parsing broker/UART data) that a single `emctl` call can't express.
+description: Script the Emerson emulator directly via its Python bindings (the `emerson` module installed inside the `emerson-server` container) instead of shelling out to individual `emerson ctl` commands. Use when the user wants a Python script or REPL against Emerson, mentions `import emerson`, `EmulatorController`, `Connection`, `Machine`, `Device`, or needs control flow (polling loops, conditionals, parsing broker/UART data) that a single `emerson ctl` call can't express.
 ---
 
 # Emerson Python Library
 
 `emerson-server` ships a Python package, `emerson`, that's a real binding to the
-same emulator engine `emctl` drives over HTTP — not just a wrapper around the
-CLI. It exposes strictly more than `emctl` does (e.g. checkpoint step-back,
+same emulator engine `emerson ctl` drives over HTTP — not just a wrapper around the
+CLI. It exposes strictly more than `emerson ctl` does (e.g. checkpoint step-back,
 `run_command_string`, blocking waits on debugger/serial events), and lets you
-express loops/conditionals in one process instead of many `emctl` invocations.
+express loops/conditionals in one process instead of many `emerson ctl` invocations.
 
 Requires the [emerson skill](../emerson/SKILL.md)'s prerequisites: `emerson-server`
-running (`emerson load ...`) and normally a project session started (`emctl start`).
+running (`emerson start ...`), which also starts a project session.
 
 ## Getting a Python shell
 
 The library only exists inside the container — there's nothing to `pip install`
 on the host. Get to it with `emerson exec` (the host lifecycle tool's
 convenience wrapper around `docker exec` into `emerson-server`, same container
-`emctl` itself execs into):
+`emerson ctl` itself execs into):
 
 ```sh
 emerson exec                                        # interactive shell, then: python3
@@ -71,7 +71,7 @@ reference. Module lives at
   (`get_exception_names`, `get_any_raised_exceptions`,
   `enable_exception_halting`/`disable_exception_halting`),
   `translate_address(address)`, and **`invoke_action(action, args='')`** /
-  `list_actions()` — the same custom board/peripheral verbs `emctl action`
+  `list_actions()` — the same custom board/peripheral verbs `emerson ctl action`
   exposes, callable directly.
 - **`Debugpoint`** / **`DebugpointInfo`** — handles returned by the
   breakpoint/watchpoint/stoppoint creators above (`id`, `target`, `access`,
@@ -83,7 +83,7 @@ reference. Module lives at
 from emerson import EmulatorController
 
 with EmulatorController("http://localhost:10314").connect() as conn:
-    # find the session emctl start created for your project
+    # find the session 'emerson start' created for your project
     session_id = next(sid for sid, name in conn.get_instance_list())
     with conn.attach(session_id) as machine:
         print(machine.state, machine.tick_count)
@@ -107,9 +107,9 @@ with EmulatorController("http://localhost:10314").connect() as conn:
         print(machine.read_from_broker if False else machine.get_broker_history("tty0"))
 ```
 
-## When to reach for this vs. `emctl`
+## When to reach for this vs. `emerson ctl`
 
-Use `emctl` for one-off inspection and simple scripts — it's less ceremony and
+Use `emerson ctl` for one-off inspection and simple scripts — it's less ceremony and
 already non-interactive/agent-friendly (see the [emerson skill](../emerson/SKILL.md)).
 Reach for the Python API when you need:
 
@@ -117,17 +117,17 @@ Reach for the Python API when you need:
   branching on emulator state, retry logic.
 - Many reads/actions combined in one process instead of N separate `docker exec`
   round-trips.
-- Capabilities `emctl` doesn't surface at all: `step_back`, `run_command_string`,
+- Capabilities `emerson ctl` doesn't surface at all: `step_back`, `run_command_string`,
   `await_debugger_event`/`await_serial_event` (see Gotchas), direct snapshot
   bytes (`get_current_snapshot`/`load_snapshot_from_bytes`).
 - Parsing broker/UART output programmatically rather than eyeballing raw bytes
-  from `emctl broker <name>` (see Gotchas for which broker method to use).
+  from `emerson ctl broker <name>` (see Gotchas for which broker method to use).
 
 ## Running tests in parallel
 
 The server supports many concurrent sessions of the *same* project, and
 they run genuinely in parallel (not just concurrently-scheduled on one
-core) — measured on `stm32f030r8` 1.0.12: one session doing a fixed amount
+core) — measured on `stm32f030r8`: one session doing a fixed amount
 of `step()` work took ~33s; four of those sessions run at once, each in its
 own process, took ~35s total, not ~130s. This is the basis for running a
 test suite's tests concurrently, one emulator session per test, instead of
@@ -202,10 +202,10 @@ detected from the container's cgroup, then `pytest -n <N>`.
 - The package is only inside the container's image — don't try to `pip install
   emerson` or import it on the host.
 - `Connection.attach(session_id)` needs a session that already exists (same
-  precondition as `emctl` needing `emctl start` first); find its id via
+  precondition as `emerson ctl` needing `emerson start` first); find its id via
   `conn.get_instance_list()` rather than guessing.
 - `Machine.step(n)` steps **ticks**, not instructions — that's a different
-  unit than `emctl step [n]` (instructions). Don't assume parity between the
+  unit than `emerson ctl step [n]` (instructions). Don't assume parity between the
   two.
 - **`Machine.step(n)` returns before the step has finished.** It dispatches the
   command and returns while the emulator is still executing, and the overrun
@@ -221,7 +221,7 @@ detected from the container's cgroup, then `pytest -n <N>`.
   Small steps hide it — they finish faster than the next HTTP round trip, so a
   script written against `step(500)` behaves perfectly and the same script at
   `step(8000)` is quietly wrong. There is no error and nothing in the return
-  value to indicate it. Measured on `stm32f030r8` 1.0.7, reading the *same*
+  value to indicate it. Measured on `stm32f030r8`, reading the *same*
   register three times immediately after `step()`:
 
   ```
@@ -236,10 +236,10 @@ detected from the container's cgroup, then `pytest -n <N>`.
   independent — it has already produced one spurious emulator bug report.
   Tracked as [emerson-issues#11](https://github.com/tuliptreetech/emerson-issues/issues/11).
 
-  `emctl step` has the same behaviour, with no `wait` subcommand — poll
-  `emctl state` until `paused` instead (see the [emerson skill](../emerson/SKILL.md)).
+  `emerson ctl step` has the same behaviour, with no `wait` subcommand — poll
+  `emerson ctl state` until `paused` instead (see the [emerson skill](../emerson/SKILL.md)).
 - `step_back` requires checkpointing enabled (`enable_checkpointing()`) —
-  same requirement as `emctl checkpoint enable`.
+  same requirement as `emerson ctl checkpoint enable`.
 - **A session leaked by a crashed script (no `stop_project`) stalls a new one
   on the same project.** The new session still reports `state: Running` and a
   normally-climbing `tick_count`, but the machine makes no real progress
