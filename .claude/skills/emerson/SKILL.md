@@ -1,6 +1,6 @@
 ---
 name: Emerson SoC Emulator
-description: Use and control the Emerson hardware/SoC emulator via the single `emerson` command (`emerson start` / `emerson ctl` / `emerson stop`). Use when the user mentions Emerson, the emulator, emctl, flashing/loading firmware into a simulated chip, or inspecting/stepping/debugging emulated device state (registers, memory, breakpoints, device tree, brokers).
+description: Use and control the Emerson hardware/SoC emulator via the single `emerson` command (`emerson load` / `emerson start` / `emerson ctl`). Use when the user mentions Emerson, the emulator, emctl, flashing/loading firmware into a simulated chip, or inspecting/stepping/debugging emulated device state (registers, memory, breakpoints, device tree, brokers).
 ---
 
 # Emerson SoC Emulator
@@ -11,14 +11,27 @@ updating itself, bringing up the `emerson-server` Docker container on a
 firmware image, starting emulation *sessions* on it, and talking to those
 sessions.
 
-The four verbs that cover most work:
+**This skill documents emerson 1.0.14 and later.** Check with
+`emerson version`. 1.0.14 split firmware selection out of `emerson start` into
+`emerson load`, and `emerson skills pull` always takes the latest skills, so a
+skill newer than the installed script is the normal mismatch — if `emerson
+start ./flash.bin` is accepted rather than refused, the install predates this
+skill and the Gotchas below do not apply to it.
+
+The five verbs that cover most work:
 
 ```
-emerson start ./flash.bin   # container (if needed) + a session on it, in one step
+emerson load ./flash.bin    # point the emulator at a firmware image
+emerson start               # a session on it
 emerson ctl ls              # talk to that session; 'emerson ctl <cmd>' for everything else
 emerson stop                # end the session, leave the container up
 emerson shutdown            # stop the container itself
 ```
+
+`load` chooses the firmware, `start` runs a session on it. `emerson start` does
+not take a firmware argument and refuses to bring the container up itself —
+which firmware is running has to be settled before any session exists, because
+a session reads `flash.bin` at the moment it is created.
 
 There is no standalone `emctl` command — runtime control is `emerson ctl`, and
 the interactive REPL is `emerson cli`.
@@ -66,8 +79,8 @@ Three nested things, each outliving the one inside it:
 1. **The Docker image** — the project, its device models, its `flash.bin`.
    Installed once (`emerson install` / `emerson image update`).
 2. **The container** (`emerson-server`) — one per host, brought up on a
-   *specific firmware file* that is bind-mounted in. Ended by
-   `emerson shutdown`.
+   *specific firmware file* that is bind-mounted in. Created only by
+   `emerson load`; ended by `emerson shutdown`.
 3. **A session** — one running emulated machine, created from the mounted
    firmware. Several can run at once in the same container. Ended by
    `emerson stop`.
@@ -75,7 +88,8 @@ Three nested things, each outliving the one inside it:
 ```
 emerson install             # one-time: PATH+symlinks, license, pull docker image
 emerson peripherals pull    # optional: pull .emerson/peripherals.yaml, trim to devices you care about
-emerson start ./flash.bin   # container (if not up) + a session on it, paused at reset
+emerson load ./flash.bin    # bring the container up on this firmware
+emerson start               # a session on it, paused at reset
 emerson ctl go / step / ... # drive execution, inspect state
 emerson stop                # end the session; container stays up for the next 'start'
 emerson shutdown            # stop the container, ending every session in it
@@ -84,43 +98,43 @@ emerson exec ...            # run a command inside the running container (bash, 
 
 The container/session split is a speed tradeoff: restarting a *session* takes
 about a second, restarting the *container* costs the image load and the
-server's whole startup (~8 s here). So prefer `emerson stop` + `emerson start`
-over `emerson shutdown` — but see the stale-bind-mount gotcha, which forces a
-full `shutdown` after most rebuilds.
+server's whole startup (~8 s here). That is why the rebuild loop is a bare
+`emerson start` — it replaces only the session, and reaches for the container
+only when it has to (see the stale-mount gotcha).
 
 `emerson start` is idempotent and is meant to be the one command you re-run:
 
-- Container down → brings it up, then starts a session.
-- Container up, firmware unchanged → **reattaches** to the recorded session,
-  leaving it exactly as it was (a `running` machine keeps running; the tick
-  counter keeps advancing). Prints `Reusing session <token>.`
-- Container up, firmware *content* changed (md5 of the file differs from what
-  was recorded when the session started) → stops that session and starts a
-  fresh one on the new image. Prints
+- Container down → **refuses**, naming the last-loaded firmware and pointing at
+  `emerson load`. It never picks a firmware for you.
+- Firmware unchanged → **reattaches** to the recorded session, leaving it
+  exactly as it was (a `running` machine keeps running; the tick counter keeps
+  advancing). Prints `Reusing session <token>.`
+- Firmware *content* changed (md5 of the file differs from what was recorded
+  when the session started) → stops that session and starts a fresh one on the
+  new image. Prints
   `Firmware changed since session <token> started; replacing that session.`
-- Firmware *path* differs from what the container has mounted → refuses, and
-  tells you to re-run with `--reload` or `emerson shutdown` first, because
-  changing it means recreating the container and killing every session in it.
-  Nothing is destroyed by the refusal.
+- The container can no longer see the firmware through its mount — a rebuild
+  replaced the file rather than rewriting it — → recreates the container
+  itself and starts a fresh session. Prints `The firmware was replaced on disk
+  since it was loaded, so ...; reloading it.` If other sessions would be lost
+  in the process it refuses instead and names them; see Gotchas.
 
-With no firmware argument, `emerson start` reuses whatever was loaded last, so
-the rebuild-and-rerun loop is *meant* to be a bare `emerson start`. In practice
-it isn't — a rebuild breaks the firmware bind mount and a bare `start` then
-destroys your session without replacing it. Use
-`emerson shutdown && emerson start` after a rebuild; see the first entry under
-Gotchas for why.
+So the rebuild-and-rerun loop *is* a bare `emerson start`. Reach for
+`emerson load` when you want a **different** firmware file, or when `start`
+tells you to.
 
 A running container is a prerequisite for every `emerson ctl` command (the
-wrapper errors `Emerson Server is not running. Please start it with
-'emerson start'`). Within that container, a session is a prerequisite for
-nearly all of them — the exceptions are `project`, `peripherals`, and
+wrapper errors `Emerson Server is not running. Please start it with 'emerson
+load <firmware-file>'`). Within that container, a session is a prerequisite
+for nearly all of them — the exceptions are `project`, `peripherals`, and
 `--help`, which read static project config and work with the container alone.
 
 ## `emerson` — host lifecycle commands
 
 ```
 # Running the emulator
-emerson start [firmware] [--new] [--project N] [--reload]  # container if needed + session; reattaches or replaces (see lifecycle above)
+emerson load [firmware] [--reload] [--project N]        # bring the container up on a firmware file; no firmware = reload the last one
+emerson start [--new] [--project N]                     # a session on the loaded firmware; reattaches or replaces (see lifecycle above)
 emerson stop [session|--all]                            # end a session, leave the container up
 emerson shutdown                                        # stop the container, ending every session in it
 emerson sessions                                        # list running sessions, '*' marks the recorded one
@@ -164,7 +178,7 @@ and args to run it directly, e.g. `emerson exec python3 -c "..."`; stdin is
 forwarded, so `emerson exec python3 -` works for piping in a script). Prefer it
 over raw `docker exec ... emerson-server ...`.
 
-Only `start`, `shutdown`, `license`, and `skills` check for a newer
+Only `load`, `start`, `shutdown`, `license`, and `skills` check for a newer
 release, and at most once a day (stamped in `~/.emerson/last_update_check`,
 overridable with `$EMERSON_UPDATE_CHECK_INTERVAL`). Notably `emerson ctl` does
 **not** — it's the inner loop of a debugging session, so it makes no network
@@ -211,7 +225,7 @@ session clears it.
 with a message naming the `emerson`-level equivalent to use instead. That's
 deliberate: `emerson ctl` injects the recorded token, so `emerson ctl stop`
 would stop the recorded session while leaving it recorded as current. Use
-`emerson start` / `stop` / `shutdown` / `sessions` / `start --project <name>`.
+`emerson start` / `stop` / `shutdown` / `sessions` / `load --project <name>`.
 
 ## I2C peripherals (`.emerson/peripherals.yaml`)
 
@@ -243,15 +257,17 @@ Each entry needs `name`, `address` (hex), and either `native: <kind>` (one of
 the catalog kinds for that controller) or `path: <python-file>` for a custom
 target. **To scope the emulated bus down to only the devices you care about,
 edit this file directly** — delete the entries you don't need, keep/add the
-ones you do. `emerson start` automatically mounts `.emerson/peripherals.yaml`
+ones you do. `emerson load` automatically mounts `.emerson/peripherals.yaml`
 into the container when it's present in the cwd, so edits take effect on the
-next `emerson start`; no need to re-pull or rebuild anything. (Unlike the
-firmware, `peripherals.yaml` is edited in place, so its bind mount survives —
-but the container still only re-reads it when a session is created.)
+next `emerson start`; no need to re-pull, rebuild, or reload anything. (Unlike
+the firmware, `peripherals.yaml` is edited in place, so its bind mount
+survives — but the container still only re-reads it when a session is
+created. A peripherals file at a *new path* is a new mount, so that one does
+need an `emerson load`.)
 
 `peripherals pull` takes an optional `[path]` (a directory gets
 `peripherals.yaml` appended); either way it also points Emerson's stored
-peripherals reference at that file for `emerson start` to pick up. To go back
+peripherals reference at that file for `emerson load` to pick up. To go back
 to the image's default peripherals instead of your override, run
 `emerson peripherals clear` — it clears the stored reference but does not
 delete the override file itself.
@@ -274,10 +290,11 @@ session needed). Global options: `--host HOST` (default
 
 **Config**
 - `emerson ctl project` — print current default project (no session needed)
-- To change the default project, use `emerson start --project <name>` — `ctl set-project` is blocked (see Sessions)
+- To change the default project, use `emerson load --project <name>` — `ctl set-project` is blocked (see Sessions)
 - `emerson ctl peripherals` — print the I2C peripheral catalog and the project's current `peripherals.yaml`; reads static config, so no session is needed (just the container running)
 
 **Session/server management** — not available via `ctl`; use the `emerson`-level verbs
+- `emerson load [firmware]` — bring the container up on a firmware file
 - `emerson start` / `emerson start --new` — create a session
 - `emerson stop [token|--all]` — end a session, container stays up
 - `emerson shutdown` — stop the container, ending every session
@@ -371,7 +388,8 @@ serial channel with `emerson ctl broker <name>` instead.
 ## Typical session, end to end
 
 ```bash
-emerson start ./flash.bin       # container (needs valid license) + a paused session
+emerson load ./flash.bin        # container on that firmware (needs a valid license)
+emerson start                   # a paused session on it
 emerson ctl state               # -> paused
 emerson ctl ls                  # top-level device tree, e.g.: Cortex-M0  MEM
 emerson ctl find                # full tree as path/kind pairs, with offsets for addressed devices
@@ -382,12 +400,13 @@ emerson ctl logs -f             # Ctrl+C to stop streaming
 emerson stop                    # end the session, container stays up
 ```
 
-Then the edit-build-run loop. Because a rebuild usually breaks the bind mount
-(see Gotchas), it is a full container cycle, not just a session one:
+Then the edit-build-run loop, which is a bare `emerson start`. It replaces the
+session, and silently repairs the container's firmware mount first if the
+rebuild replaced the file rather than rewriting it (see Gotchas):
 
 ```bash
 make                            # or ./docker-build.sh
-emerson shutdown && emerson start   # NOT a bare 'emerson start' — see the gotcha
+emerson start
 ```
 
 ## Breakpoints, watchpoints, and stoppoints — which to use
@@ -466,54 +485,64 @@ Confirmed by testing:
 
 ## Gotchas
 
-- **A rebuild usually breaks the firmware bind mount, and a bare `emerson start`
-  then destroys your session without replacing it.** This is the most expensive
-  gotcha here, and it hits the exact loop `start` was designed for.
+- **A rebuild often invalidates the firmware bind mount — `emerson start`
+  detects and repairs that, but can be blocked by other sessions.**
 
   The firmware reaches the container as a **single-file bind mount**, which
-  Docker pins to the file's *inode*, fixed when the container is created.
-  `arm-none-eabi-objcopy` (and most build tools) writes the output by creating
+  Docker pins to the file's *inode* when the container is created.
+  `arm-none-eabi-objcopy` (and most build tools) writes its output by creating
   a **new** file rather than rewriting the old one in place, so after `make`
-  the container's mount points at a deleted inode:
+  the mount points at an inode the host has unlinked. It shows up two ways
+  depending on the host:
+
+  - Docker Desktop's file sharing drops the file, so the server gets
+    `No such file or directory` when it reads `flash.bin` — which it only does
+    as a session is created.
+  - A native Linux bind mount keeps the unlinked inode alive and serves its
+    **old contents**, so nothing errors and the session silently runs stale
+    firmware.
+
+  `docker inspect` reports the configured source path in both cases, so the
+  mount looks healthy from outside. `emerson start` therefore asks the
+  container directly — readability plus an md5 of what it actually sees —
+  *before* it touches any session, and recreates the container when the answer
+  is wrong:
 
   ```
-  $ docker exec emerson-server ls /opt/tuliptree/emerson/projects/<proj>/flash.bin
-  ls: cannot access '...': No such file or directory
+  $ make && emerson start
+  The firmware was replaced on disk since it was loaded, so the container can no
+  longer read it; reloading it.
+  Session:   0e6358a24ad4bd27
   ```
 
-  `emerson start` doesn't check for this. It notices the md5 changed, **stops
-  the working session first**, then fails to create the replacement:
+  Recreating the container ends **every** session in it, which is free only for
+  the session `start` was going to discard anyway. When anything else is
+  running — another shell's session, or the one `--new` was meant to sit
+  beside — `start` refuses instead and names them:
 
   ```
-  Firmware changed since session <token> started; replacing that session.
-  RuntimeError: ... "internal machine error: couldn't read file
-    \"/opt/tuliptree/emerson/projects/<proj>/flash.bin\": No such file or directory"
-  Error: failed to start a session for project <proj>.
+  Error: the container is not reading the firmware on disk - it was replaced
+  since it was loaded, so the container can no longer read it.
+    /work/build/f030-i2c-charger.bin
+    Fixing that means recreating the container, which would end these sessions:
+      4953d2b04416bbfe  stm32f030r8
+    Run 'emerson load --reload' to do that, or 'emerson shutdown' first.
   ```
 
-  You are left with no session at all, and `emerson sessions` reports none.
+  **Nothing is destroyed by that refusal** — the sessions it names are still
+  running. Do what it says (`emerson load --reload`, accepting their loss) or
+  stop them first. Don't reach for `emerson shutdown && emerson start` as a
+  reflex the way older releases required; it costs the full container startup
+  (~8 s) on every rebuild, which is exactly what the session/container split
+  exists to avoid.
 
-  **`--reload` does not fix it**, despite sounding like it should: the reload
-  branch is only reached when the firmware *path* differs from what's mounted.
-  Here the path is identical — only the inode changed — so `--reload` is
-  ignored and the container is left with its dead mount.
-
-  **The fix is `emerson shutdown` first**, which recreates the container and
-  therefore the mount:
-
-  ```bash
-  make && emerson shutdown && emerson start
-  ```
-
-  Make that the reflex after any rebuild. It costs the container startup (~8 s
-  here), which is the thing the session/container split was meant to save — but
-  a bare `emerson start` costs you the session *and* still doesn't work.
-
-  Confirmed by inode: an in-place write that preserves the inode
-  (`dd conv=notrunc`, or `cp` over the existing file) *does* propagate straight
-  through the live mount to the container, while a rebuild that replaces the
-  file does not. So a build that writes its output in place would be immune;
-  the standard objcopy-based one isn't.
+  A build that writes its output in place (`dd conv=notrunc`, or `cp` over the
+  existing file) preserves the inode and never triggers any of this — the new
+  bytes propagate straight through the live mount. The standard objcopy-based
+  one doesn't. Fixed in 1.0.14 ([emerson-issues#22](https://github.com/tuliptreetech/emerson-issues/issues/22));
+  on 1.0.13 and earlier a bare `emerson start` after a rebuild stops the
+  working session and then fails to replace it, leaving none, and `--reload`
+  does not help because it was gated on the firmware *path* differing.
 
 - **The host script and the container image must be version-matched.** The
   script drives the server with flags its own release understands, so a
@@ -522,8 +551,8 @@ Confirmed by testing:
   `Error: failed to start a session`. `emerson update` updates only the script,
   so pair it with `emerson image update <tarball>`. `emerson info` shows both
   versions — check them against each other when `start` fails oddly.
-- Almost every `emerson ctl` command needs both: (1) the `emerson-server` container running, and (2) a session started — both of which `emerson start` gives you. The error messages name exactly which precondition is missing — read them, don't guess. The exceptions that need no session are `ctl project`, `ctl peripherals`, and `ctl --help`.
-- `emerson start` requires a valid stored license (`emerson license show`/`emerson license set`).
+- Almost every `emerson ctl` command needs both: (1) the `emerson-server` container running, which is `emerson load`, and (2) a session started, which is `emerson start`. The error messages name exactly which precondition is missing — read them, don't guess. The exceptions that need no session are `ctl project`, `ctl peripherals`, and `ctl --help`.
+- `emerson load` requires a valid stored license (`emerson license show`/`emerson license set`), as does `emerson start` on the path where it reloads the container itself.
 - `action` vs top-level commands: an unrecognized top-level verb is a hard error, never silently treated as a device action — you must type `emerson ctl action <path> <verb>` explicitly. Use `emerson ctl actions <path>` first to see what a device supports.
 - `snap load <name>` takes the snapshot name *without* the `.snap` extension.
 - `sp` (stoppoint) halts the emulator *after* the access completes, unlike a breakpoint which halts before executing.
