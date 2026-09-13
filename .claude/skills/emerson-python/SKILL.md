@@ -11,8 +11,9 @@ CLI. It exposes strictly more than `emerson ctl` does (e.g. checkpoint step-back
 `run_command_string`, blocking waits on debugger/serial events), and lets you
 express loops/conditionals in one process instead of many `emerson ctl` invocations.
 
-Requires the [emerson skill](../emerson/SKILL.md)'s prerequisites: `emerson-server`
-running (`emerson start ...`), which also starts a project session.
+Requires the [emerson skill](../emerson/SKILL.md)'s prerequisites:
+`emerson-server` running on a firmware image (`emerson load ./flash.bin`) and a
+project session on it (`emerson start`).
 
 ## Getting a Python shell
 
@@ -202,8 +203,8 @@ detected from the container's cgroup, then `pytest -n <N>`.
 - The package is only inside the container's image — don't try to `pip install
   emerson` or import it on the host.
 - `Connection.attach(session_id)` needs a session that already exists (same
-  precondition as `emerson ctl` needing `emerson start` first); find its id via
-  `conn.get_instance_list()` rather than guessing.
+  precondition as `emerson ctl` needing `emerson load` + `emerson start`
+  first); find its id via `conn.get_instance_list()` rather than guessing.
 - `Machine.step(n)` steps **ticks**, not instructions — that's a different
   unit than `emerson ctl step [n]` (instructions). Don't assume parity between the
   two.
