@@ -52,7 +52,8 @@ with emerson.attach_session() as machine:   # the session `emerson start` record
   from `EMERSON_HOST`/`EMERSON_SESSION`/`EMERSON_PROJECT`, which
   `emerson run` sets. Helpers: `default_host()`, and
   `find_session(conn, project, session)` (raises `RuntimeError` naming what's
-  missing).
+  missing). With no session given it takes the project's *first* running
+  session, so pass `session=` when several are running.
 - **`EmulatorController(host).connect()`** → **`Connection`** (a context
   manager): `run_project(name)` → token, `stop_project(token)`,
   `get_instance_list()` → `[(token, project)]`, `attach(token)` → `Machine`.
@@ -60,7 +61,9 @@ with emerson.attach_session() as machine:   # the session `emerson start` record
 - **`Machine`**:
   - Execution: `go()`, `pause()`, `reset()`, `step(n)` in **ticks** (not
     instructions), `wait()`, `go_to_counter(n)`, `step_back(n)` (needs
-    `enable_checkpointing()`), `state`, `tick_count`.
+    `enable_checkpointing()`), `state` (`'Paused'`, `'Running'`; capitalized,
+    unlike `emerson ctl state`), `tick_count`. A new session starts paused
+    at tick 0.
   - Brokers: `subscribe_broker(name)` → `.read(timeout=)` / `.close()`
     (only bytes sent after subscribing), `send_to_broker`,
     `get_broker_history`, `list_brokers`.
@@ -73,8 +76,11 @@ with emerson.attach_session() as machine:   # the session `emerson start` record
     `get_common_registers()`, `get_memory(addr, size)`, `set_memory(addr, data)`.
   - Device verbs: `invoke_action(verb, args="")`, `list_actions()`.
   - Debugpoints: `break_on_address`, `watch_*` and `stop_on_*`, with
-    `enable_`/`disable_`/`delete_`/`get_` variants. They return `Debugpoint`
-    objects (`id`, `hit_count`).
+    `enable_`/`disable_`/`delete_`/`get_` variants. Setting one returns a
+    `Debugpoint` (`id` only); `get_breakpoint(id)` and its siblings return a
+    `DebugpointInfo` (`hit_count`, `enabled`, `kind`, `target`).
+  - Signals: `get_signal_descriptors()` → `[(name, unit, role)]`,
+    `read_signal(name)` → `(value, unit, tick)`.
   - Also `get_disassembly` and the exception-halting controls.
 
 ## Gotchas
