@@ -6,6 +6,7 @@ Claude Code skills for working with [Emerson](https://github.com/tuliptreetech/e
 
 - **`.claude/skills/emerson`** — the `emerson` (lifecycle) and `emctl` (runtime control) CLIs: installing, loading firmware, starting sessions, inspecting/stepping device state.
 - **`.claude/skills/emerson-python`** — the Python bindings inside the `emerson-server` container, for scripting beyond what `emctl` exposes.
+- **`.claude/skills/emerson-js`** — the JavaScript bindings inside the `emerson-server` container, for scripting beyond what `emctl` exposes that can be loaded directly into the `emerson-server` container for advanced visualization.
 
 ## Using these skills
 
